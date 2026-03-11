@@ -1,4 +1,25 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>◈ MindSpace</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #0b0b14; overflow: hidden; height: 100%; touch-action: none; }
+    #root { width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useCallback } = React;
+
 
 const COLORS = [
   '#818cf8','#a78bfa','#c084fc','#e879f9',
@@ -599,7 +620,7 @@ function createInitial(){
 // ══════════════════════════════════════════════════════════════════════════════
 //  MAIN APP
 // ══════════════════════════════════════════════════════════════════════════════
-export default function MindSpaceApp(){
+function MindSpaceApp(){
   const [app,setApp]               = useState(createInitial);
   const [history,setHistory]       = useState([]);
   const [future,setFuture]         = useState([]);
@@ -1112,13 +1133,13 @@ export default function MindSpaceApp(){
                 <label style={lbl}>FARBE</label>
                 <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:8}}>
                   {COLORS.map(c=>(
-                    <div key={c} onClick={()=>patchNode(selNode,{color:c})}
+                    <div key={c} onClick={()=>{if(Date.now()-panelOpenedAt.current<400)return;patchNode(selNode,{color:c});}}
                       style={{width:22,height:22,borderRadius:'50%',background:c,cursor:'pointer',
                         border:selNodeObj.color===c?'3px solid #fff':'2px solid #1e1e30',
                         boxShadow:selNodeObj.color===c?`0 0 8px ${c}aa`:'none',transition:'all .15s'}}/>
                   ))}
                 </div>
-                <button onClick={()=>patchNode(selNode,{colorBorder:!selNodeObj.colorBorder})}
+                <button onClick={()=>{if(Date.now()-panelOpenedAt.current<400)return;patchNode(selNode,{colorBorder:!selNodeObj.colorBorder});}}
                   style={{...btn(selNodeObj.colorBorder?selNodeObj.color:'#3a3a55',selNodeObj.colorBorder?`${selNodeObj.color}15`:'transparent'),
                     justifyContent:'space-between',marginBottom:14,border:`1px solid ${selNodeObj.colorBorder?selNodeObj.color+'60':'#252540'}`}}>
                   <span>Farbiger Rand</span>
@@ -1247,3 +1268,8 @@ export default function MindSpaceApp(){
     </div>
   );
 }
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(MindSpaceApp));
+  </script>
+</body>
+</html>
+
