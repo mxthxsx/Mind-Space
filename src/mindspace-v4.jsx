@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-const COLORS      = ['#818cf8','#f472b6','#34d399','#fbbf24','#60a5fa','#f87171','#a78bfa','#2dd4bf','#fb923c'];
-const EDGE_COLORS = ['#6b6b9a','#818cf8','#f472b6','#34d399','#fbbf24','#60a5fa','#f87171','#a78bfa','#2dd4bf'];
+const COLORS = [
+  '#818cf8','#a78bfa','#c084fc','#e879f9',
+  '#f472b6','#fb7185','#f87171','#fb923c',
+  '#fbbf24','#a3e635','#34d399','#2dd4bf',
+  '#60a5fa','#38bdf8','#94a3b8','#e2e8f0',
+  '#ffffff','#f8fafc',
+];
+const EDGE_COLORS = ['#6b6b9a','#818cf8','#f472b6','#34d399','#fbbf24','#60a5fa','#f87171','#a78bfa','#2dd4bf','#fb923c','#c084fc','#38bdf8'];
 const SHAPES      = ['rounded','rect','pill','circle','diamond','hexagon'];
 const SHAPE_ICONS = {rounded:'▭',rect:'▬',pill:'⬭',circle:'◯',diamond:'◇',hexagon:'⬡'};
 const SHAPE_NAMES = {rounded:'Abgerundet',rect:'Rechteck',pill:'Pille',circle:'Kreis',diamond:'Raute',hexagon:'Sechseck'};
@@ -32,7 +38,7 @@ const rnd         = n  => Math.floor(Math.random()*n);
 const getNodeSize = s  => s==='circle'?[72,72]:s==='diamond'?[130,70]:s==='hexagon'?[140,54]:[158,48];
 const mkNode = (label,x,y,color=COLORS[0],shape='rounded') => {
   const [w,h]=getNodeSize(shape);
-  return {id:uid(),label,x,y,color,shape,w,h,notesHtml:'',images:[],childMapId:null};
+  return {id:uid(),label,x,y,color,shape,w,h,notesHtml:'',images:[],childMapId:null,colorBorder:false};
 };
 const mkEdge = (from,to) => ({id:uid(),from,to,style:'curved',arrow:'forward',color:'#6b6b9a',cp:null,routing:false,label:''});
 const mkMap  = name => ({id:uid(),name,nodes:[],edges:[],createdAt:Date.now()});
@@ -178,9 +184,12 @@ function arrowPts(tx,ty,angle,size=11){
 
 // ── NodeShape ─────────────────────────────────────────────────────────────────
 function NodeShape({node,selected}){
-  const {x,y,w,h,color,shape}=node;
-  const fill='#12121e',stroke=selected?color:'#1e1e32',sw=selected?2:1;
-  const sty={filter:selected?`drop-shadow(0 0 12px ${color}66)`:'none',transition:'filter .2s'};
+  const {x,y,w,h,color,shape,colorBorder}=node;
+  const fill='#12121e';
+  const stroke=selected?color:colorBorder?color:'#1e1e32';
+  const sw=selected?2.5:colorBorder?1.5:1;
+  const glow=selected?`drop-shadow(0 0 12px ${color}66)`:colorBorder?`drop-shadow(0 0 4px ${color}44)`:'none';
+  const sty={filter:glow,transition:'filter .2s'};
   const p={fill,stroke,strokeWidth:sw,style:sty};
   if(shape==='rect')   return <rect x={x} y={y} width={w} height={h} {...p}/>;
   if(shape==='pill')   return <rect x={x} y={y} width={w} height={h} rx={h/2} {...p}/>;
@@ -494,13 +503,13 @@ function ExportModal({data,onClose}){
 function HomeScreen({maps,mapOrder,onOpen,onDelete,onNew,onRename,onImport}){
   const [editing,setEditing]=useState(null);
   const importRef=useRef(null);
+  const isMob=typeof window!=='undefined'&&window.innerWidth<768;
   const commit=()=>{if(editing?.val.trim())onRename(editing.id,editing.val.trim());setEditing(null);};
   return (
-    <div style={{minHeight:'100vh',background:'#0b0b14',color:'#c9d1d9',fontFamily:'"IBM Plex Sans",sans-serif'}}>
-      <div style={{borderBottom:'1px solid #181828',padding:'16px 36px',display:'flex',alignItems:'center',gap:12}}>
-        <div style={{fontFamily:'Unbounded',fontSize:15,color:'#818cf8',letterSpacing:'-0.3px'}}>◈ MindSpace</div>
-        <div style={{width:1,height:18,background:'#181828'}}/>
-        <div style={{fontSize:11,color:'#2a2a42'}}>Verschachtelte Mind Maps</div>
+    <div style={{minHeight:'100vh',background:'#0b0b14',color:'#c9d1d9',fontFamily:'"IBM Plex Sans",sans-serif',overflowY:'auto'}}>
+      <div style={{borderBottom:'1px solid #181828',padding:isMob?'14px 16px':'16px 36px',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <div style={{fontFamily:'Unbounded',fontSize:isMob?13:15,color:'#818cf8',letterSpacing:'-0.3px'}}>◈ MindSpace</div>
+        {!isMob&&<><div style={{width:1,height:18,background:'#181828'}}/><div style={{fontSize:11,color:'#2a2a42'}}>Verschachtelte Mind Maps</div></>}
         <div style={{marginLeft:'auto',display:'flex',gap:8}}>
           <input ref={importRef} type="file" accept=".json" onChange={e=>{
             const f=e.target.files[0];if(!f)return;
@@ -508,48 +517,42 @@ function HomeScreen({maps,mapOrder,onOpen,onDelete,onNew,onRename,onImport}){
             r.onload=ev=>{try{onImport(JSON.parse(ev.target.result));}catch(ex){}};
             r.readAsText(f);e.target.value='';
           }} style={{display:'none'}}/>
-          <button onClick={()=>importRef.current?.click()} style={{background:'transparent',border:'1px solid #252545',color:'#7a7a9a',borderRadius:8,padding:'9px 14px',fontSize:12,fontFamily:'inherit',cursor:'pointer'}}>📥 Importieren</button>
-          <button onClick={onNew} style={{background:'#818cf8',border:'none',color:'#fff',borderRadius:8,padding:'9px 20px',fontSize:13,fontFamily:'inherit',fontWeight:500,cursor:'pointer'}}>+ Neue Map</button>
+          <button onClick={()=>importRef.current?.click()} style={{background:'transparent',border:'1px solid #252545',color:'#7a7a9a',borderRadius:8,padding:isMob?'8px 10px':'9px 14px',fontSize:isMob?11:12,fontFamily:'inherit',cursor:'pointer'}}>📥 {isMob?'':'Importieren'}</button>
+          <button onClick={onNew} style={{background:'#818cf8',border:'none',color:'#fff',borderRadius:8,padding:isMob?'8px 14px':'9px 20px',fontSize:isMob?12:13,fontFamily:'inherit',fontWeight:500,cursor:'pointer'}}>+ Neue Map</button>
         </div>
       </div>
-      <div style={{padding:'32px 36px'}}>
-        <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'0.12em',marginBottom:18}}>MEINE MAPS ({mapOrder.length})</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(210px,1fr))',gap:14}}>
+      <div style={{padding:isMob?'20px 14px':'32px 36px'}}>
+        <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'0.12em',marginBottom:14}}>MEINE MAPS ({mapOrder.length})</div>
+        <div style={{display:'grid',gridTemplateColumns:isMob?'1fr 1fr':'repeat(auto-fill,minmax(210px,1fr))',gap:10}}>
           {mapOrder.map(id=>{
             const m=maps[id];if(!m)return null;
             const isEdit=editing?.id===id;
             return (
               <div key={id} onClick={()=>{if(!isEdit)onOpen(id);}}
-                style={{background:'#0f0f1a',border:'1px solid #181828',borderRadius:12,padding:'18px 16px',cursor:'pointer',position:'relative',transition:'all .15s'}}
-                onMouseEnter={e=>{e.currentTarget.style.borderColor='#818cf850';e.currentTarget.style.boxShadow='0 4px 22px #818cf812';}}
-                onMouseLeave={e=>{e.currentTarget.style.borderColor='#181828';e.currentTarget.style.boxShadow='none';}}>
-                <div style={{width:38,height:38,background:'#818cf815',borderRadius:9,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,marginBottom:14,color:'#818cf8'}}>◈</div>
+                style={{background:'#0f0f1a',border:'1px solid #181828',borderRadius:12,padding:isMob?'14px 12px':'18px 16px',cursor:'pointer',position:'relative',transition:'all .15s'}}>
+                <div style={{width:32,height:32,background:'#818cf815',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,marginBottom:10,color:'#818cf8'}}>◈</div>
                 {isEdit
                   ? <input autoFocus value={editing.val} onChange={e=>setEditing({...editing,val:e.target.value})}
                       onBlur={commit} onKeyDown={e=>{if(e.key==='Enter')commit();if(e.key==='Escape')setEditing(null);}}
                       onClick={e=>e.stopPropagation()}
-                      style={{width:'100%',background:'#0d0d18',border:'1px solid #818cf8',color:'#e2e8f0',borderRadius:6,padding:'4px 8px',fontSize:14,fontFamily:'inherit',outline:'none',marginBottom:5,boxSizing:'border-box'}}/>
-                  : <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:5}}>
-                      <div style={{fontSize:14,fontWeight:600,color:'#e2e8f0',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>{m.name}</div>
+                      style={{width:'100%',background:'#0d0d18',border:'1px solid #818cf8',color:'#e2e8f0',borderRadius:6,padding:'4px 8px',fontSize:13,fontFamily:'inherit',outline:'none',marginBottom:4,boxSizing:'border-box'}}/>
+                  : <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:4}}>
+                      <div style={{fontSize:isMob?12:14,fontWeight:600,color:'#e2e8f0',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>{m.name}</div>
                       <div onClick={e=>{e.stopPropagation();setEditing({id,val:m.name});}}
-                        style={{color:'#3a3a55',fontSize:12,cursor:'pointer',padding:'2px 4px',borderRadius:4}}
-                        onMouseEnter={e=>e.currentTarget.style.color='#818cf8'}
-                        onMouseLeave={e=>e.currentTarget.style.color='#3a3a55'}>✎</div>
+                        style={{color:'#3a3a55',fontSize:11,cursor:'pointer',padding:'2px 4px',borderRadius:4}}>✎</div>
                     </div>
                 }
-                <div style={{fontSize:11,color:'#3a3a55'}}>{m.nodes.length} Knoten · {m.edges.length} Verbindungen</div>
-                <div style={{fontSize:10,color:'#252540',marginTop:4}}>{new Date(m.createdAt).toLocaleDateString('de')}</div>
+                <div style={{fontSize:10,color:'#3a3a55'}}>{m.nodes.length} K · {m.edges.length} V</div>
+                <div style={{fontSize:9,color:'#252540',marginTop:2}}>{new Date(m.createdAt).toLocaleDateString('de')}</div>
                 <button onClick={e=>{e.stopPropagation();onDelete(id);}}
-                  style={{position:'absolute',top:10,right:10,background:'none',border:'none',color:'#3a3a55',fontSize:16,padding:'2px 6px',borderRadius:4,fontFamily:'inherit',cursor:'pointer'}}>×</button>
+                  style={{position:'absolute',top:8,right:8,background:'none',border:'none',color:'#3a3a55',fontSize:14,padding:'2px 5px',borderRadius:4,fontFamily:'inherit',cursor:'pointer'}}>×</button>
               </div>
             );
           })}
           <div onClick={onNew}
-            style={{background:'transparent',border:'1px dashed #222238',borderRadius:12,padding:18,cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:130,color:'#333355'}}
-            onMouseEnter={e=>e.currentTarget.style.borderColor='#818cf860'}
-            onMouseLeave={e=>e.currentTarget.style.borderColor='#222238'}>
-            <div style={{fontSize:30,marginBottom:8}}>+</div>
-            <div style={{fontSize:12}}>Neue Map</div>
+            style={{background:'transparent',border:'1px dashed #222238',borderRadius:12,padding:14,cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:isMob?90:130,color:'#333355'}}>
+            <div style={{fontSize:24,marginBottom:6}}>+</div>
+            <div style={{fontSize:11}}>Neue Map</div>
           </div>
         </div>
       </div>
@@ -620,10 +623,11 @@ export default function MindSpaceApp(){
   const pinchRef                   = useRef(null); // {dist}
 
   const svgRef=useRef(null),fileRef=useRef(null),dragRef=useRef(null),didMove=useRef(false);
+  const panelOpenedAt=useRef(0); // timestamp when right panel last opened
   const zoomR=useRef(zoom),panR=useRef(pan),selNodeR=useRef(selNode),selEdgeR=useRef(selEdge),appR=useRef(app);
   useEffect(()=>{zoomR.current=zoom;},[zoom]);
   useEffect(()=>{panR.current=pan;},[pan]);
-  useEffect(()=>{selNodeR.current=selNode;},[selNode]);
+  useEffect(()=>{selNodeR.current=selNode;if(selNode)panelOpenedAt.current=Date.now();},[selNode]);
   useEffect(()=>{selEdgeR.current=selEdge;},[selEdge]);
   useEffect(()=>{appR.current=app;},[app]);
 
@@ -706,7 +710,7 @@ export default function MindSpaceApp(){
     pushHistory();
     const n=mkNode('Neu',160+rnd(300),120+rnd(230),COLORS[rnd(COLORS.length)]);
     setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],nodes:[...s.maps[mid].nodes,n]}}};});
-    setSelNode(n.id);setSelEdge(null);
+    setSelNode(null);setSelEdge(null);setSidebarOpen(false);
   };
 
   // ── Navigation ────────────────────────────────────────────────────────────
@@ -786,12 +790,20 @@ export default function MindSpaceApp(){
       // pinch-to-zoom with 2 fingers
       if(e.touches.length===2){
         e.preventDefault();
-        const dx=e.touches[0].clientX-e.touches[1].clientX;
-        const dy=e.touches[0].clientY-e.touches[1].clientY;
+        const t0=e.touches[0],t1=e.touches[1];
+        const dx=t0.clientX-t1.clientX,dy=t0.clientY-t1.clientY;
         const dist=Math.sqrt(dx*dx+dy*dy);
+        const midX=(t0.clientX+t1.clientX)/2;
+        const midY=(t0.clientY+t1.clientY)/2;
         if(pinchRef.current){
           const ratio=dist/pinchRef.current;
-          setZoom(z=>Math.min(3,Math.max(0.15,z*ratio)));
+          // zoom centered on pinch midpoint
+          const oldZoom=zoomR.current;
+          const newZoom=Math.min(3,Math.max(0.15,oldZoom*ratio));
+          const wx=(midX-panR.current.x)/oldZoom;
+          const wy=(midY-panR.current.y)/oldZoom;
+          setZoom(newZoom);
+          setPan({x:midX-wx*newZoom,y:midY-wy*newZoom});
         }
         pinchRef.current=dist;
         return;
@@ -827,7 +839,17 @@ export default function MindSpaceApp(){
 
   useEffect(()=>{
     const svg=svgRef.current;if(!svg)return;
-    const wh=(e)=>{e.preventDefault();setZoom(z=>Math.min(3,Math.max(0.15,z*(e.deltaY>0?0.92:1.08))));};
+    const wh=(e)=>{
+      e.preventDefault();
+      const rect=svg.getBoundingClientRect();
+      const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+      const oldZoom=zoomR.current;
+      const newZoom=Math.min(3,Math.max(0.15,oldZoom*(e.deltaY>0?0.92:1.08)));
+      const wx=(mx-panR.current.x)/oldZoom;
+      const wy=(my-panR.current.y)/oldZoom;
+      setZoom(newZoom);
+      setPan({x:mx-wx*newZoom,y:my-wy*newZoom});
+    };
     svg.addEventListener('wheel',wh,{passive:false});return()=>svg.removeEventListener('wheel',wh);
   },[screen]);
 
@@ -858,7 +880,10 @@ export default function MindSpaceApp(){
   };
   const handleNodeTouchEnd=(e,nodeId)=>{
     e.stopPropagation();
-    // Only open panel if finger didn't move (it was a tap, not a drag)
+    if(connectMode&&selNodeR.current&&nodeId!==selNodeR.current){
+      addEdgeBetween(selNodeR.current,nodeId);setConnMode(false);return;
+    }
+    // Only open panel if finger didn't move (tap, not drag)
     if(!didMove.current){setSelNode(nodeId);setSelEdge(null);}
   };
   const handleEdgeClick=(e,edgeId)=>{e.stopPropagation();setSelEdge(edgeId);setSelNode(null);};
@@ -937,7 +962,7 @@ export default function MindSpaceApp(){
 
         <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'.1em',marginBottom:7}}>WERKZEUGE</div>
         <button onClick={addNode}                style={{...btn('#818cf8','#818cf812'),justifyContent:'center',fontWeight:500,marginBottom:5}}>+ Knoten</button>
-        <button onClick={()=>{setConnMode(v=>!v);if(!connectMode){setSelNode(null);setSelEdge(null);}}} style={{...btn(connectMode?'#f472b6':'#a5b4fc',connectMode?'#f472b615':'transparent'),justifyContent:'center',marginBottom:5}}>🔗 {connectMode?'Verbinden aktiv':'Verbinden'}</button>
+        <button onClick={()=>setConnMode(v=>!v)} style={{...btn(connectMode?'#f472b6':'#a5b4fc',connectMode?'#f472b615':'transparent'),justifyContent:'center',marginBottom:5}}>🔗 {connectMode?'Verbinden aktiv':'Verbinden'}</button>
         <button onClick={()=>setShowTpl(true)}   style={{...btn('#7dd3fc'),justifyContent:'center',marginBottom:5}}>📐 Vorlage</button>
         <button onClick={()=>autoLayout('radial')}       style={{...btn('#a78bfa'),justifyContent:'center',marginBottom:5}}>⊙ Radial-Layout</button>
         <button onClick={()=>autoLayout('hierarchical')} style={{...btn('#a78bfa'),justifyContent:'center',marginBottom:14}}>⊤ Hierarchie-Layout</button>
@@ -999,10 +1024,11 @@ export default function MindSpaceApp(){
                   <path d={geo.d} fill="none" stroke={col} strokeWidth={isSel?2.5:1.5} strokeDasharray={isSel?'7,3':undefined}/>
                   {hasEnd   && <polygon points={arrowPts(geo.x2,geo.y2,geo.endDir,11)}   fill={col} style={{pointerEvents:'none'}}/>}
                   {hasStart && <polygon points={arrowPts(geo.x1,geo.y1,geo.startDir,11)} fill={col} style={{pointerEvents:'none'}}/>}
-                  {isSel&&edge.routing&&geo.handlePos && (
-                    <circle cx={geo.handlePos.x} cy={geo.handlePos.y} r={7} fill="#818cf8" stroke="#0b0b14" strokeWidth={2}
+                  {isSel && geo.handlePos && (
+                    <circle cx={geo.handlePos.x} cy={geo.handlePos.y} r={9} fill="#818cf8" stroke="#0b0b14" strokeWidth={2}
                       style={{cursor:'grab'}}
-                      onMouseDown={ev=>handleCpDown(ev,edge.id,geo.handlePos.x,geo.handlePos.y)}
+                      onMouseDown={ev=>{ev.stopPropagation();if(!edge.routing)patchEdge(edge.id,{routing:true});handleCpDown(ev,edge.id,geo.handlePos.x,geo.handlePos.y);}}
+                      onTouchStart={ev=>{ev.stopPropagation();if(!edge.routing)patchEdge(edge.id,{routing:true});handleCpDown(ev,edge.id,geo.handlePos.x,geo.handlePos.y);}}
                       onClick={ev=>ev.stopPropagation()}/>
                   )}
                   {edge.label && (
@@ -1068,8 +1094,8 @@ export default function MindSpaceApp(){
         )}
       </div>
 
-      {/* RIGHT PANEL */}
-      {(selNodeObj||selEdgeObj) && (
+      {/* RIGHT PANEL — hidden while connect mode is active */}
+      {(selNodeObj||selEdgeObj) && !connectMode && (
         <div style={{width:262,background:'#0e0e19',borderLeft:'1px solid #181828',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0}}>
           <div style={{padding:'12px 14px',borderBottom:'1px solid #181828',display:'flex',alignItems:'center',gap:8}}>
             <div style={{width:9,height:9,borderRadius:'50%',background:selNodeObj?selNodeObj.color:'#a5b4fc',flexShrink:0,boxShadow:`0 0 7px ${selNodeObj?selNodeObj.color:'#a5b4fc'}99`}}/>
@@ -1084,19 +1110,29 @@ export default function MindSpaceApp(){
                 <input value={selNodeObj.label} onChange={e=>patchNode(selNode,{label:e.target.value})} style={{...inp,marginBottom:14}}/>
 
                 <label style={lbl}>FARBE</label>
-                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:14}}>
+                <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:8}}>
                   {COLORS.map(c=>(
                     <div key={c} onClick={()=>patchNode(selNode,{color:c})}
-                      style={{width:21,height:21,borderRadius:'50%',background:c,cursor:'pointer',border:selNodeObj.color===c?'3px solid #fff':'2px solid transparent',boxShadow:selNodeObj.color===c?`0 0 8px ${c}aa`:'none',transition:'all .15s'}}/>
+                      style={{width:22,height:22,borderRadius:'50%',background:c,cursor:'pointer',
+                        border:selNodeObj.color===c?'3px solid #fff':'2px solid #1e1e30',
+                        boxShadow:selNodeObj.color===c?`0 0 8px ${c}aa`:'none',transition:'all .15s'}}/>
                   ))}
                 </div>
+                <button onClick={()=>patchNode(selNode,{colorBorder:!selNodeObj.colorBorder})}
+                  style={{...btn(selNodeObj.colorBorder?selNodeObj.color:'#3a3a55',selNodeObj.colorBorder?`${selNodeObj.color}15`:'transparent'),
+                    justifyContent:'space-between',marginBottom:14,border:`1px solid ${selNodeObj.colorBorder?selNodeObj.color+'60':'#252540'}`}}>
+                  <span>Farbiger Rand</span>
+                  <span style={{background:selNodeObj.colorBorder?selNodeObj.color:'#252540',color:selNodeObj.colorBorder?'#0b0b14':'#6b6b9a',borderRadius:10,padding:'1px 7px',fontSize:10,fontWeight:600}}>
+                    {selNodeObj.colorBorder?'AN':'AUS'}
+                  </span>
+                </button>
 
                 <label style={lbl}>FORM</label>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:5,marginBottom:14}}>
                   {SHAPES.map(s=>{
                     const [nw,nh]=getNodeSize(s),active=selNodeObj.shape===s;
                     return (
-                      <button key={s} onClick={()=>patchNode(selNode,{shape:s,w:nw,h:nh})}
+                      <button key={s} onClick={()=>{if(Date.now()-panelOpenedAt.current<400)return;patchNode(selNode,{shape:s,w:nw,h:nh});}}
                         style={{...btn(active?selNodeObj.color:'#3a3a55',active?`${selNodeObj.color}18`:'transparent'),justifyContent:'center',flexDirection:'column',padding:'8px 4px',gap:2,fontSize:11,border:`1px solid ${active?selNodeObj.color:'#1e1e30'}`}}>
                         <span style={{fontSize:17}}>{SHAPE_ICONS[s]}</span>
                         <span>{SHAPE_NAMES[s]}</span>
@@ -1131,7 +1167,7 @@ export default function MindSpaceApp(){
                 <button onClick={()=>fileRef.current?.click()} style={{...btn('#818cf8'),border:'1px dashed #252545',justifyContent:'center',marginBottom:14}}>+ Bild anhängen</button>
 
                 <div style={{borderTop:'1px solid #181828',paddingTop:12,display:'flex',flexDirection:'column',gap:6}}>
-                  <button onClick={()=>{setConnMode(true);setSelNode(null);setSelEdge(null);}} style={btn('#a5b4fc')}>🔗 Verbindung erstellen</button>
+                  <button onClick={()=>setConnMode(true)} style={btn('#a5b4fc')}>🔗 Verbindung erstellen</button>
                   <button onClick={openSubMap} style={btn(selNodeObj.childMapId?'#34d399':'#a5b4fc',selNodeObj.childMapId?'#0d1f15':'transparent')}>
                     🗺️ {selNodeObj.childMapId?'Sub-Map öffnen →':'Sub-Map erstellen'}
                     {selNodeObj.childMapId && <span style={{marginLeft:'auto',width:7,height:7,borderRadius:'50%',background:'#34d399'}}/>}
@@ -1169,21 +1205,15 @@ export default function MindSpaceApp(){
                   ))}
                 </div>
 
-                {selEdgeObj.style!=='straight' && (
-                  <div style={{marginBottom:14}}>
-                    <button onClick={()=>patchEdge(selEdge,{routing:!selEdgeObj.routing,cp:selEdgeObj.routing?null:selEdgeObj.cp})}
-                      style={{...btn(selEdgeObj.routing?'#34d399':'#4a4a6a',selEdgeObj.routing?'#0d1f1580':'transparent'),border:`1px solid ${selEdgeObj.routing?'#34d39960':'#252540'}`,justifyContent:'space-between'}}>
-                      <span>⬡ Verlauf manuell</span>
-                      <span style={{background:selEdgeObj.routing?'#34d399':'#252540',color:selEdgeObj.routing?'#0b0b14':'#6b6b9a',borderRadius:10,padding:'1px 7px',fontSize:10,fontWeight:600}}>
-                        {selEdgeObj.routing?'AN':'AUS'}
-                      </span>
-                    </button>
-                    {selEdgeObj.routing && (
-                      <div style={{background:'#0d0d18',border:'1px solid #1e1e30',borderRadius:8,padding:'8px 11px',marginTop:6,fontSize:11,color:'#5a5a7a',lineHeight:1.7}}>
-                        Ziehe den <span style={{color:'#818cf8'}}>● blauen Kreis</span> auf der Linie.
-                        {selEdgeObj.cp && <><br/><span style={{color:'#34d399',cursor:'pointer'}} onClick={()=>patchEdge(selEdge,{cp:null})}>↺ Zurücksetzen</span></>}
-                      </div>
-                    )}
+                {selEdgeObj.style!=='straight' && selEdgeObj.cp && (
+                  <div style={{marginBottom:14,background:'#0d0d18',border:'1px solid #1e1e30',borderRadius:8,padding:'8px 11px',fontSize:11,color:'#5a5a7a',lineHeight:1.7,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span>Verlauf angepasst</span>
+                    <span style={{color:'#34d399',cursor:'pointer',fontWeight:500}} onClick={()=>patchEdge(selEdge,{cp:null,routing:false})}>↺ Zurücksetzen</span>
+                  </div>
+                )}
+                {selEdgeObj.style!=='straight' && !selEdgeObj.cp && (
+                  <div style={{marginBottom:14,fontSize:11,color:'#3a3a55',padding:'6px 10px',background:'#0d0d18',borderRadius:8,border:'1px solid #1e1e30'}}>
+                    ● Blauen Punkt ziehen zum Anpassen
                   </div>
                 )}
 
