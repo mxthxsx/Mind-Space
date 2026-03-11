@@ -1,25 +1,4 @@
-<!DOCTYPE html>
-<html lang="de">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-  <meta name="apple-mobile-web-app-capable" content="yes"/>
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-  <title>◈ MindSpace</title>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { background: #0b0b14; overflow: hidden; height: 100%; touch-action: none; }
-    #root { width: 100vw; height: 100vh; }
-  </style>
-</head>
-<body>
-  <div id="root"></div>
-  <script type="text/babel">
-    const { useState, useRef, useEffect, useCallback } = React;
-
+import { useState, useRef, useEffect, useCallback } from "react";
 
 const COLORS = [
   '#818cf8','#a78bfa','#c084fc','#e879f9',
@@ -620,7 +599,7 @@ function createInitial(){
 // ══════════════════════════════════════════════════════════════════════════════
 //  MAIN APP
 // ══════════════════════════════════════════════════════════════════════════════
-function MindSpaceApp(){
+export default function MindSpaceApp(){
   const [app,setApp]               = useState(createInitial);
   const [history,setHistory]       = useState([]);
   const [future,setFuture]         = useState([]);
@@ -1268,8 +1247,3 @@ function MindSpaceApp(){
     </div>
   );
 }
-    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(MindSpaceApp));
-  </script>
-</body>
-</html>
-
