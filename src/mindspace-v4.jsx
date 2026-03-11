@@ -500,7 +500,7 @@ function ExportModal({data,onClose}){
 }
 
 // ── HomeScreen ────────────────────────────────────────────────────────────────
-function HomeScreen({maps,mapOrder,onOpen,onDelete,onNew,onRename,onImport}){
+function HomeScreen({maps,mapOrder,onOpen,onDelete,onNew,onRename,onImport,onReset}){
   const [editing,setEditing]=useState(null);
   const importRef=useRef(null);
   const isMob=typeof window!=='undefined'&&window.innerWidth<768;
@@ -519,6 +519,7 @@ function HomeScreen({maps,mapOrder,onOpen,onDelete,onNew,onRename,onImport}){
           }} style={{display:'none'}}/>
           <button onClick={()=>importRef.current?.click()} style={{background:'transparent',border:'1px solid #252545',color:'#7a7a9a',borderRadius:8,padding:isMob?'8px 10px':'9px 14px',fontSize:isMob?11:12,fontFamily:'inherit',cursor:'pointer'}}>📥 {isMob?'':'Importieren'}</button>
           <button onClick={onNew} style={{background:'#818cf8',border:'none',color:'#fff',borderRadius:8,padding:isMob?'8px 14px':'9px 20px',fontSize:isMob?12:13,fontFamily:'inherit',fontWeight:500,cursor:'pointer'}}>+ Neue Map</button>
+          <button onClick={onReset} title="Alle Daten zurücksetzen" style={{background:'transparent',border:'1px solid #f8717130',color:'#f87171',borderRadius:8,padding:isMob?'8px 10px':'9px 12px',fontSize:13,fontFamily:'inherit',cursor:'pointer'}}>🗑️</button>
         </div>
       </div>
       <div style={{padding:isMob?'20px 14px':'32px 36px'}}>
@@ -589,6 +590,8 @@ function Minimap({nodes,edges,pan,zoom,svgW,svgH,hiddenColors}){
 }
 
 // ── Initial state ─────────────────────────────────────────────────────────────
+const STORAGE_KEY = 'mindspace_v4';
+
 function createInitial(){
   const m1=applyTemplate(mkMap('Mechatronik'),'mindmap');
   ['Mechatronik','Mechanik','Elektrotechnik','Informatik','Physik','Mathematik','Konstruktion'].forEach((l,i)=>{if(m1.nodes[i])m1.nodes[i].label=l;});
@@ -596,11 +599,19 @@ function createInitial(){
   return {screen:'home',maps:{[m1.id]:m1,[m2.id]:m2},mapOrder:[m1.id,m2.id],currentMapId:null,navStack:[]};
 }
 
+function loadSaved(){
+  try {
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(raw){const d=JSON.parse(raw);if(d?.maps&&d?.mapOrder)return{...createInitial(),...d,screen:'home'};}
+  } catch(e){}
+  return createInitial();
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  MAIN APP
 // ══════════════════════════════════════════════════════════════════════════════
 export default function MindSpaceApp(){
-  const [app,setApp]               = useState(createInitial);
+  const [app,setApp]               = useState(loadSaved);
   const [history,setHistory]       = useState([]);
   const [future,setFuture]         = useState([]);
   const [selNode,setSelNode]       = useState(null);
@@ -630,6 +641,19 @@ export default function MindSpaceApp(){
   useEffect(()=>{selNodeR.current=selNode;if(selNode)panelOpenedAt.current=Date.now();},[selNode]);
   useEffect(()=>{selEdgeR.current=selEdge;},[selEdge]);
   useEffect(()=>{appR.current=app;},[app]);
+
+  // Auto-save to localStorage on every change
+  useEffect(()=>{
+    try{localStorage.setItem(STORAGE_KEY,JSON.stringify({maps:app.maps,mapOrder:app.mapOrder}));}catch(e){}
+  },[app.maps,app.mapOrder]);
+
+  // Auto-save to localStorage on every app change (debounced 600ms)
+  useEffect(()=>{
+    const t=setTimeout(()=>{
+      try{localStorage.setItem('mindspace_data',JSON.stringify({maps:app.maps,mapOrder:app.mapOrder}));}catch(e){}
+    },600);
+    return()=>clearTimeout(t);
+  },[app.maps,app.mapOrder]);
 
   useEffect(()=>{
     const update=()=>{if(svgRef.current){const r=svgRef.current.getBoundingClientRect();setSvgSize({w:r.width,h:r.height});}};
@@ -759,6 +783,7 @@ export default function MindSpaceApp(){
     };
     img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(s);
   };
+  const resetAll=()=>{setConfirm({msg:'Alle Daten auf diesem Gerät löschen?',onOk:()=>{try{localStorage.removeItem(STORAGE_KEY);}catch(e){}setApp(createInitial());setConfirm(null);}});};
   const importData=(data)=>{if(data?.maps&&data?.mapOrder)setApp(s=>({...s,...data,screen:'home'}));};
   const autoLayout=(type)=>{
     if(!curMap)return;pushHistory();
@@ -907,7 +932,7 @@ export default function MindSpaceApp(){
   if(screen==='home') return (
     <>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=Unbounded:wght@600&display=swap');*{box-sizing:border-box;margin:0;padding:0;}button:hover{opacity:.78;cursor:pointer;}`}</style>
-      <HomeScreen maps={maps} mapOrder={mapOrder} onOpen={openMap} onDelete={deleteMap} onNew={()=>setShowNewMap(true)} onRename={renameMap} onImport={importData}/>
+      <HomeScreen maps={maps} mapOrder={mapOrder} onOpen={openMap} onDelete={deleteMap} onNew={()=>setShowNewMap(true)} onRename={renameMap} onImport={importData} onReset={resetAll}/>
       {showNewMap && <NewMapModal onClose={()=>setShowNewMap(false)} onCreate={createMap}/>}
       {confirm    && <ConfirmModal msg={confirm.msg} onOk={confirm.onOk} onCancel={()=>setConfirm(null)}/>}
       {exportModal && <ExportModal data={exportModal} onClose={()=>setExportModal(null)}/>}
