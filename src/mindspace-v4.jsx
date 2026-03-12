@@ -50,7 +50,7 @@ const mkNode = (label,x,y,color=COLORS[0],shape='rounded') => {
   const [w,h]=getNodeSize(shape);
   return {id:uid(),label,x,y,color,shape,w,h,notesHtml:'',images:[],childMapId:null,linkMapId:null,colorBorder:false,colorFill:false,status:null,tags:[]};
 };
-const mkEdge  = (from,to) => ({id:uid(),from,to,style:'curved',arrow:'forward',color:'#6b6b9a',cp:null,routing:false,label:''});
+const mkEdge  = (from,to) => ({id:uid(),from,to,style:'curved',arrow:'forward',color:'#6b6b9a',cp:null,routing:false,label:'',animated:false});
 const mkMap   = name => ({id:uid(),name,nodes:[],edges:[],groups:[],createdAt:Date.now()});
 const mkGroup = (nodeIds,color,label='') => ({id:uid(),nodeIds,color,label});
 
@@ -82,7 +82,43 @@ function getDescendants(rootId, edges){
   return visited;
 }
 
-// ── Markdown export ───────────────────────────────────────────────────────────
+// Directed BFS for focus mode: follows only OUTWARD edges from the source
+// forward  → A→B: from focused A, show B (and recursively B's forward neighbors)
+// backward → A←B: from focused A, show B (following the "backward" arrow direction)
+// both     → both directions
+// none     → no traversal
+function getFocusStrand(srcId, edges){
+  const visible=new Set([srcId]);
+  const queue=[srcId];
+  while(queue.length){
+    const cur=queue.shift();
+    edges.forEach(e=>{
+      let next=null;
+      if(e.arrow==='forward'  && e.from===cur) next=e.to;
+      else if(e.arrow==='backward' && e.to===cur)   next=e.from;
+      else if(e.arrow==='both'){
+        if(e.from===cur) next=e.to;
+        else if(e.to===cur) next=e.from;
+      }
+      // arrow==='none': skip
+      if(next&&!visible.has(next)){visible.add(next);queue.push(next);}
+    });
+  }
+  return visible;
+}
+
+// Shape-only component for clipPath definitions
+function NodeShapeClip({node,pad=2}){
+  const {x,y,w,h,shape}=node;
+  const xi=x+pad,yi=y+pad,wi=w-pad*2,hi=h-pad*2;
+  if(shape==='circle') return <ellipse cx={xi+wi/2} cy={yi+hi/2} rx={wi/2} ry={hi/2}/>;
+  if(shape==='diamond'){const cx=xi+wi/2,cy=yi+hi/2;return <path d={`M${cx},${yi} L${xi+wi},${cy} L${cx},${yi+hi} L${xi},${cy}Z`}/>;}
+  if(shape==='hexagon'){const cx=xi+wi/2,cy=yi+hi/2,rx=wi/2,ry=hi/2;const pts=Array.from({length:6},(_,i)=>{const a=(i*60-30)*Math.PI/180;return `${cx+rx*Math.cos(a)},${cy+ry*Math.sin(a)}`;}).join(' ');return <polygon points={pts}/>;}
+  if(shape==='pill') return <rect x={xi} y={yi} width={wi} height={hi} rx={hi/2}/>;
+  return <rect x={xi} y={yi} width={wi} height={hi} rx={8}/>;
+}
+
+
 function generateMarkdown(nodes,edges){
   if(!nodes.length) return '';
   // Build child map (directed: forward edges from→to, backward to→from)
@@ -196,6 +232,103 @@ function layoutHierarchical(nodes,edges){
   return result;
 }
 
+// ── Gruppen-Layout: cluster grouped nodes together, ungrouped spread around ──
+function layoutGroups(nodes, groups){
+  if(!nodes.length) return nodes;
+  const PAD=24, NODE_GAP=14, GROUP_GAP=60;
+  const nmap={};nodes.forEach(n=>{nmap[n.id]=n;});
+  const ungroupedIds=new Set(nodes.map(n=>n.id));
+  const result={};
+  const clusters=[];
+
+  (groups||[]).forEach(g=>{
+    const gnodes=g.nodeIds.map(id=>nmap[id]).filter(Boolean);
+    if(!gnodes.length) return;
+    gnodes.forEach(n=>ungroupedIds.delete(n.id));
+    // Pack group nodes in rows of ~3
+    const cols=Math.min(3,gnodes.length);
+    let bx=0,by=0;
+    gnodes.forEach((n,i)=>{
+      const col=i%cols,row=Math.floor(i/cols);
+      result[n.id]={x:PAD+col*(n.w+NODE_GAP),y:PAD+24+row*(n.h+NODE_GAP)};
+      bx=Math.max(bx,PAD+col*(n.w+NODE_GAP)+n.w+PAD);
+      by=Math.max(by,PAD+24+row*(n.h+NODE_GAP)+n.h+PAD);
+    });
+    clusters.push({w:bx,h:by,nodeIds:g.nodeIds});
+  });
+
+  // Layout clusters in a grid
+  let cx=40,cy=40,rowH=0,colMax=2,col=0;
+  clusters.forEach(cl=>{
+    const gnodes=cl.nodeIds.map(id=>nmap[id]).filter(Boolean);
+    gnodes.forEach(n=>{if(result[n.id]){result[n.id].x+=cx;result[n.id].y+=cy;}});
+    rowH=Math.max(rowH,cl.h+GROUP_GAP);
+    col++;
+    cx+=cl.w+GROUP_GAP;
+    if(col>=colMax){cx=40;cy+=rowH;rowH=0;col=0;}
+  });
+
+  // Ungrouped nodes in a row at the bottom
+  let ux=40,uy=cy+(clusters.length?rowH:0)+GROUP_GAP/2;
+  [...ungroupedIds].forEach(id=>{
+    const n=nmap[id];if(!n)return;
+    result[id]={x:ux,y:uy};
+    ux+=n.w+NODE_GAP;
+    if(ux>800){ux=40;uy+=n.h+NODE_GAP;}
+  });
+
+  return nodes.map(n=>({...n,...(result[n.id]||{})}));
+}
+
+// ── Force-directed layout (50 iterations of spring simulation) ──────────────
+function layoutForce(nodes,edges){
+  if(!nodes.length) return nodes;
+  const IDEAL=220,REPEL=18000,DAMP=0.8,ITER=55;
+  let pos=nodes.map(n=>({id:n.id,x:n.x+n.w/2,y:n.y+n.h/2,vx:0,vy:0}));
+  const posMap=()=>{const m={};pos.forEach(p=>{m[p.id]=p;});return m;};
+  for(let it=0;it<ITER;it++){
+    const m=posMap();
+    const forces={};pos.forEach(p=>{forces[p.id]={fx:0,fy:0};});
+    // Repulsion between all pairs
+    for(let i=0;i<pos.length;i++){for(let j=i+1;j<pos.length;j++){
+      const a=pos[i],b=pos[j],dx=b.x-a.x,dy=b.y-a.y;
+      const d=Math.max(1,Math.sqrt(dx*dx+dy*dy));
+      const f=REPEL/(d*d);
+      forces[a.id].fx-=f*dx/d;forces[a.id].fy-=f*dy/d;
+      forces[b.id].fx+=f*dx/d;forces[b.id].fy+=f*dy/d;
+    }}
+    // Attraction along edges
+    edges.forEach(e=>{
+      const a=m[e.from],b=m[e.to];if(!a||!b)return;
+      const dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.sqrt(dx*dx+dy*dy));
+      const f=(d-IDEAL)/IDEAL*0.8;
+      forces[e.from].fx+=f*dx/d;forces[e.from].fy+=f*dy/d;
+      forces[e.to].fx-=f*dx/d;forces[e.to].fy-=f*dy/d;
+    });
+    pos=pos.map(p=>({...p,vx:(p.vx+forces[p.id].fx)*DAMP,vy:(p.vy+forces[p.id].fy)*DAMP,x:p.x+(p.vx+forces[p.id].fx)*DAMP,y:p.y+(p.vy+forces[p.id].fy)*DAMP}));
+  }
+  // Translate so min x/y = 40
+  const minX=Math.min(...pos.map(p=>p.x)),minY=Math.min(...pos.map(p=>p.y));
+  const m=posMap();pos.forEach(p=>{p.x+=40-minX+20;p.y+=40-minY+20;});
+  const pm=posMap();
+  return nodes.map(n=>{const p=pm[n.id];return p?{...n,x:p.x-n.w/2,y:p.y-n.h/2}:n;});
+}
+
+// ── Timeline layout: horizontal lanes by status, sorted by node index ────────
+function layoutTimeline(nodes){
+  if(!nodes.length) return nodes;
+  const LANES=['star','fire','idea','warn','check','pin',null];
+  const laneH=90,startX=40,nodeGap=20,laneY=(li)=>40+li*laneH;
+  const byLane={};LANES.forEach(l=>{byLane[l||'__none']=[];});
+  nodes.forEach(n=>{const key=n.status&&LANES.includes(n.status)?n.status:'__none';byLane[key].push(n);});
+  const result=[];
+  LANES.forEach((l,li)=>{
+    const key=l||'__none';
+    let x=startX;
+    byLane[key].forEach(n=>{result.push({...n,x,y:laneY(li)+(laneH-n.h)/2});x+=n.w+nodeGap;});
+  });
+  return result;
+}
 // ── Edge geometry ─────────────────────────────────────────────────────────────
 function nodeIntersect(node,fx,fy){
   const cx=node.x+node.w/2,cy=node.y+node.h/2,dx=fx-cx,dy=fy-cy;
@@ -234,6 +367,27 @@ function arrowPts(tx,ty,angle,size=11){
   const half=size*.52,bx=tx-size*Math.cos(angle),by=ty-size*Math.sin(angle);
   const wx=half*Math.sin(angle),wy=-half*Math.cos(angle);
   return `${tx},${ty} ${bx+wx},${by+wy} ${bx-wx},${by-wy}`;
+}
+
+// ── Indicator positions (shape-aware, guaranteed inside shape) ────────────────
+function getIndicatorPositions(node){
+  const {x,y,w,h,shape}=node;
+  const cx=x+w/2,cy=y+h/2;
+  if(shape==='circle'){
+    const f=0.53;
+    return {tr:{x:cx+w/2*f,y:cy-h/2*f},br:{x:cx+w/2*f,y:cy+h/2*f},bl:{x:cx-w/2*f,y:cy+h/2*f}};
+  }
+  if(shape==='diamond'){
+    return {tr:{x:cx+w*0.20,y:cy-h*0.20},br:{x:cx+w*0.20,y:cy+h*0.20},bl:{x:cx-w*0.20,y:cy+h*0.20}};
+  }
+  if(shape==='hexagon'){
+    return {tr:{x:cx+w*0.30,y:cy-h*0.26},br:{x:cx+w*0.30,y:cy+h*0.26},bl:{x:cx-w*0.30,y:cy+h*0.26}};
+  }
+  if(shape==='pill'){
+    const r=Math.min(h/2-2,w*0.1);
+    return {tr:{x:x+w-r-9,y:y+h*0.28},br:{x:x+w-r-9,y:y+h*0.72},bl:{x:x+r+9,y:y+h*0.72}};
+  }
+  return {tr:{x:x+w-9,y:y+10},br:{x:x+w-9,y:y+h-9},bl:{x:x+9,y:y+h-9}};
 }
 
 // ── NodeShape ─────────────────────────────────────────────────────────────────
@@ -341,13 +495,20 @@ function GlobalSearchPanel({maps,mapOrder,onJump,onClose}){
     return chain.map(mid=>maps[mid]?.name||'?').join(' › ');
   };
   const allMapIds=Object.keys(maps);
-  const results=q.trim().length>1?allMapIds.flatMap(mid=>{
+  const qLow=q.toLowerCase();
+  const nodeResults=q.trim().length>1?allMapIds.flatMap(mid=>{
     const m=maps[mid];if(!m)return[];
     return m.nodes.filter(n=>
-      n.label.toLowerCase().includes(q.toLowerCase())||
-      (n.tags||[]).some(t=>t.toLowerCase().includes(q.toLowerCase()))
-    ).map(n=>({mapId:mid,pathStr:getPath(mid),node:n,isSub:!mapOrder.includes(mid)}));
+      n.label.toLowerCase().includes(qLow)||
+      (n.tags||[]).some(t=>t.toLowerCase().includes(qLow))
+    ).map(n=>({type:'node',mapId:mid,pathStr:getPath(mid),node:n,isSub:!mapOrder.includes(mid)}));
   }):[];
+  const groupResults=q.trim().length>1?allMapIds.flatMap(mid=>{
+    const m=maps[mid];if(!m)return[];
+    return (m.groups||[]).filter(g=>(g.label||'').toLowerCase().includes(qLow))
+      .map(g=>({type:'group',mapId:mid,pathStr:getPath(mid),group:g,isSub:!mapOrder.includes(mid)}));
+  }):[];
+  const results=[...nodeResults,...groupResults];
   return (
     <div style={{position:'fixed',inset:0,background:'#00000088',display:'flex',alignItems:'flex-start',justifyContent:'center',zIndex:400,paddingTop:'12vh'}} onClick={onClose}>
       <div style={{background:'#0f0f1a',border:'1px solid #252545',borderRadius:16,width:'min(580px,94vw)',maxHeight:'60vh',display:'flex',flexDirection:'column',overflow:'hidden',boxShadow:'0 24px 80px #00000099'}} onClick={e=>e.stopPropagation()}>
@@ -361,18 +522,25 @@ function GlobalSearchPanel({maps,mapOrder,onJump,onClose}){
           {q.trim().length<=1 && <div style={{padding:'24px 18px',fontSize:12,color:'#3a3a55',textAlign:'center'}}>Mindestens 2 Zeichen eingeben…</div>}
           {q.trim().length>1 && results.length===0 && <div style={{padding:'24px 18px',fontSize:12,color:'#3a3a55',textAlign:'center'}}>Keine Ergebnisse gefunden.</div>}
           {results.map((r,i)=>(
-            <div key={i} onClick={()=>onJump(r.mapId,r.node.id)}
+            <div key={i} onClick={()=>r.type==='node'?onJump(r.mapId,r.node.id):onJump(r.mapId,r.group.nodeIds[0]||'')}
               style={{padding:'10px 18px',borderBottom:'1px solid #0f0f18',cursor:'pointer',display:'flex',alignItems:'center',gap:12}}
               onMouseEnter={e=>e.currentTarget.style.background='#161626'}
               onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
-              <div style={{width:10,height:10,borderRadius:'50%',background:r.node.color,flexShrink:0,boxShadow:`0 0 6px ${r.node.color}88`}}/>
+              {r.type==='node'
+                ?<div style={{width:10,height:10,borderRadius:'50%',background:r.node.color,flexShrink:0,boxShadow:`0 0 6px ${r.node.color}88`}}/>
+                :<div style={{width:10,height:10,borderRadius:2,background:'transparent',border:`2px dashed ${r.group.color}`,flexShrink:0}}/>}
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:13,color:'#e2e8f0',fontWeight:500}}>{r.node.label}
-                  {r.node.status&&<span style={{marginLeft:6}}>{STATUS_LIST.find(s=>s.id===r.node.status)?.icon}</span>}
-                </div>
+                {r.type==='node'
+                  ?<div style={{fontSize:13,color:'#e2e8f0',fontWeight:500}}>{r.node.label}
+                      {r.node.status&&<span style={{marginLeft:6}}>{STATUS_LIST.find(s=>s.id===r.node.status)?.icon}</span>}
+                    </div>
+                  :<div style={{fontSize:13,color:'#e2e8f0',fontWeight:500}}>⬚ {r.group.label||'Gruppe'}
+                      <span style={{marginLeft:6,fontSize:10,color:'#3a3a55'}}>{r.group.nodeIds.length} Knoten</span>
+                    </div>
+                }
                 <div style={{fontSize:10,color:'#3a3a55',marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
                   <span style={{color:r.isSub?'#34d399':'#818cf8'}}>{r.pathStr}</span>
-                  {(r.node.tags||[]).map(t=><span key={t} style={{marginLeft:5,background:'#1e1e30',color:'#7a7a9a',padding:'1px 5px',borderRadius:4,fontSize:9}}>#{t}</span>)}
+                  {r.type==='node'&&(r.node.tags||[]).map(t=><span key={t} style={{marginLeft:5,background:'#1e1e30',color:'#7a7a9a',padding:'1px 5px',borderRadius:4,fontSize:9}}>#{t}</span>)}
                 </div>
               </div>
               <span style={{fontSize:11,color:'#3a3a55',flexShrink:0}}>→</span>
@@ -618,10 +786,129 @@ function Minimap({nodes,edges,pan,zoom,svgW,svgH,hiddenColors}){
 // ── Initial state ─────────────────────────────────────────────────────────────
 const STORAGE_KEY='mindspace_v4';
 function createInitial(){
-  const m1=applyTemplate(mkMap('Mechatronik'),'mindmap');
-  ['Mechatronik','Mechanik','Elektrotechnik','Informatik','Physik','Mathematik','Konstruktion'].forEach((l,i)=>{if(m1.nodes[i])m1.nodes[i].label=l;});
-  const m2=applyTemplate(mkMap('Projekt-Planung'),'org');
-  return {screen:'home',maps:{[m1.id]:m1,[m2.id]:m2},mapOrder:[m1.id,m2.id],currentMapId:null,navStack:[]};
+  // ── Helper to build a node with all fields set ──────────────────────────────
+  const nd=(label,x,y,color,shape='rounded',extra={})=>{
+    const [w,h]=getNodeSize(shape);
+    return {id:uid(),label,x,y,color,shape,w,h,notesHtml:'',images:[],childMapId:null,linkMapId:null,colorBorder:false,colorFill:false,status:null,tags:[],...extra};
+  };
+  const ed=(from,to,extra={})=>({...mkEdge(from,to),...extra});
+
+  // ── Map 2: Projekt Alpha (linked from map 1) ──────────────────────────────
+  const p={
+    n1:nd('Projekt Alpha',310,20,'#818cf8','rect',{status:'star',notesHtml:'<div>Übergeordnetes Projektziel. Klicke auf einen Unterknoten für Details.</div>'}),
+    n2:nd('Design',60,130,'#60a5fa','rect',{status:'check',tags:['design'],notesHtml:'<div>✅ Alle Mockups abgenommen.</div>'}),
+    n3:nd('Entwicklung',310,130,'#34d399','rect',{status:'fire',tags:['dev'],notesHtml:'<div>🔥 Sprint läuft – 3 offene Tickets.</div>'}),
+    n4:nd('Testing',560,130,'#f472b6','rect',{status:'warn',tags:['qa'],notesHtml:'<div>⚠️ Wartet auf Entwicklung.</div>'}),
+    n5:nd('UI Konzept',0,255,'#60a5fa',undefined,{status:'check',tags:['design']}),
+    n6:nd('Styleguide',165,255,'#60a5fa',undefined,{status:'check',tags:['design']}),
+    n7:nd('Backend API',250,255,'#34d399',undefined,{status:'check',tags:['dev']}),
+    n8:nd('Frontend',415,255,'#34d399',undefined,{status:'fire',tags:['dev'],colorBorder:true}),
+    n9:nd('Unit Tests',500,255,'#f472b6',undefined,{status:'warn',tags:['qa']}),
+    n10:nd('E2E Tests',655,255,'#f472b6',undefined,{status:'warn',tags:['qa']}),
+  };
+  const m2=mkMap('Projekt Alpha');
+  m2.nodes=Object.values(p);
+  m2.edges=[
+    ed(p.n1.id,p.n2.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n1.id,p.n3.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n1.id,p.n4.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n2.id,p.n5.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n2.id,p.n6.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n3.id,p.n7.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n3.id,p.n8.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n4.id,p.n9.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n4.id,p.n10.id,{style:'ortho',arrow:'forward',color:'#6b6b9a'}),
+    ed(p.n8.id,p.n4.id,{style:'curved',arrow:'forward',color:'#f472b680',label:'auslösen'}),
+  ];
+  m2.groups=[];
+
+  // ── Sub-Map für "Sub-Maps" Knoten ────────────────────────────────────────
+  const sm=mkMap('Sub-Map Beispiel');
+  const smC=nd('Sub-Map',250,180,'#a78bfa','circle');smC.w=90;smC.h=90;
+  const smA=nd('Eigene Map',90,260,'#c084fc',undefined,{notesHtml:'<div>Sub-Maps sind vollständige Maps, eingebettet in einen Knoten.</div>'});
+  const smB=nd('Breadcrumb',330,260,'#c084fc',undefined,{notesHtml:'<div>Die Navigation oben links zeigt den Pfad zurück.</div>'});
+  sm.nodes=[smC,smA,smB];
+  sm.edges=[ed(smC.id,smA.id),ed(smC.id,smB.id)];sm.groups=[];
+
+  // ── Map 1: MindSpace Features ─────────────────────────────────────────────
+  // All node positions manually verified — no bounding-box overlaps.
+  // Default node: w=158, h=48.  circle: w=h=100.  pill: w=158, h=48.
+
+  const center=nd('◈ MindSpace',323,225,'#818cf8','circle',{
+    notesHtml:'<div><b>Willkommen bei MindSpace!</b><br/><br/>🖱️ <b>PC:</b> Doppelklick auf leere Fläche → neuer Knoten. Shift+Drag → Mehrfachauswahl.<br/>📱 <b>Handy:</b> ☑ Auswahl-Button oben rechts für Mehrfachauswahl.<br/><br/>Klicke auf einen Knoten für Details im rechten Panel.</div>'
+  });center.w=100;center.h=100;
+
+  // Row 1 — y=50
+  const bKnoten=nd('Knoten & Formen',105,52,'#60a5fa',undefined,{status:'idea',tags:['knoten'],colorFill:true,
+    notesHtml:'<div><b>Knoten</b><br/>• 18 Farben · 6 Formen (abgerundet, rect, pille, kreis, raute, sechseck)<br/>• Farbrand: farbiger Rand ohne Füllung<br/>• Farbfüllung: transparente Farbfläche innen<br/>• Status-Icon oben rechts im Knoten<br/>• Tags: blauer #-Punkt unten links<br/><br/>Doppelklick auf Knoten → direkt umbenennen</div>'});
+
+  const bVerbindung=nd('Verbindungen',302,50,'#34d399',undefined,{status:'star',tags:['kanten'],colorBorder:true,
+    notesHtml:'<div><b>Verbindungen</b><br/>• Doppelklick auf eine Linie → Label inline bearbeiten<br/>• Pfeilrichtung: vorwärts, rückwärts, beide, keine<br/>• Stile: gebogen, gerade, orthogonal<br/>• Farbe frei wählbar<br/><br/><b>Fluss-Animation:</b> Verbindung anklicken → Panel → ▶▶ Fluss AN<br/>Bei "beide Richtungen" laufen zwei animierte Ströme gegenläufig</div>'});
+
+  const bFokus=nd('Fokus-Modus',498,155,'#fbbf24',undefined,{status:'pin',tags:['ansicht'],
+    notesHtml:'<div><b>Fokus-Modus</b><br/>👁 Button oben rechts → aktivieren.<br/><br/>Dann einen Knoten anklicken/antippen.<br/>Alle anderen Knoten werden ausgeblendet (opacity 15%).<br/><br/><b>Richtung der Pfeile:</b> Nur Knoten in Pfeilrichtung bleiben sichtbar (BFS entlang der Kanten).<br/>Erneuter Klick auf denselben Knoten → Fokus aufheben.</div>'});
+
+  const bFilter=nd('Filter & Suche',515,265,'#f472b6',undefined,{status:'warn',tags:['ansicht','filter'],colorBorder:true,
+    notesHtml:'<div><b>Filter (Sidebar)</b><br/>• Farb-Filter: nur Knoten einer bestimmten Farbe<br/>• Tag-Filter: nach #tags filtern<br/>• Status-Filter: nach Icon filtern<br/>• Gruppen-Filter: nur Knoten einer Gruppe<br/><br/>⚠ Badge oben rechts = Filter aktiv → klicken zum Zurücksetzen.<br/>Klick auf den Canvas-Hintergrund setzt Gruppen-Filter zurück.<br/><br/><b>Lokale Suche:</b> Sidebar → Suchfeld. Bei einem Treffer: automatischer Zoom + goldener Pulsring.<br/><b>Globale Suche:</b> Ctrl+F oder "Alle Maps suchen" → durchsucht alle Maps + Sub-Maps + Gruppen</div>'});
+
+  const bSubmap=nd('Sub-Maps',452,375,'#a78bfa',undefined,{status:'check',tags:['maps'],childMapId:sm.id,
+    notesHtml:'<div><b>Sub-Maps</b><br/>Jeder Knoten kann eine eigene eingebettete Map enthalten.<br/><br/>Panel → "Sub-Map öffnen" → öffnet die Sub-Map.<br/>Breadcrumb oben links zeigt den Pfad zurück.<br/>Backlinks in der Sidebar zeigen alle Maps die diesen Knoten einbetten.</div>'});
+
+  const bLink=nd('Link-Knoten',295,448,'#2dd4bf',undefined,{tags:['maps'],linkMapId:m2.id,
+    notesHtml:'<div><b>Link-Knoten</b><br/>Doppelklick → navigiert direkt zur verlinkten Map.<br/>Kein Eltern-Kind-Verhältnis – nur ein Shortcut.<br/>⇒-Symbol und gestrichelte Unterlinie kennzeichnen Link-Knoten.</div>'});
+
+  const bKollaps=nd('Kollaps',82,318,'#fb923c',undefined,{tags:['ansicht'],
+    notesHtml:'<div><b>Kollaps</b><br/>▼ Einklappen-Button im Panel → alle Nachfolger werden ausgeblendet.<br/>+N-Badge zeigt die Anzahl versteckter Knoten.<br/>Klick auf Badge → wieder aufklappen.<br/><br/>Funktioniert entlang der Pfeilrichtung (forward/backward/both).</div>'});
+
+  const bExport=nd('Export',228,390,'#a3e635',undefined,{status:'idea',tags:['export'],
+    notesHtml:'<div><b>Export</b><br/>💾 JSON – vollständiger Export inkl. allen Maps, Kanten, Gruppen → zum Reimport.<br/>📋 Markdown – Gliederung als verschachteltes Listen-Format (Notion, Obsidian, …).<br/>🖼 PNG – Screenshot der aktuellen Canvas-Ansicht.<br/><br/>JSON-Import: Startseite → 📥 Importieren.</div>'});
+
+  // Children of bKnoten
+  const cStatus=nd('Status-Icons',45,170,'#f87171',undefined,{status:'fire',tags:['knoten'],
+    notesHtml:'<div><b>Status-Icons</b><br/>⭐ Wichtig · 🔥 Dringend · ✅ Erledigt · ⚠️ Offen · 💡 Idee · 📌 Angeheftet<br/><br/>Im rechten Panel wählen. Erscheint als Icon im Knoten (bottom-right).<br/>Status-Filter in der Sidebar: nur Knoten mit bestimmtem Status anzeigen.</div>'});
+
+  const cTags=nd('Tags & Notizen',212,170,'#fb923c','pill',{status:'check',tags:['knoten'],
+    notesHtml:'<div><b>Tags</b><br/>Freitext-Tags im Panel vergeben (Enter-Taste). Anzeige als #-Punkt im Knoten.<br/>Tag-Filter in der Sidebar nutzen.<br/><br/><b>Notizen</b><br/>Rich-Text-Editor: Fett, kursiv, Aufzählung, Tabellen, Bilder einbetten.<br/>Hover über Knoten → Kurzvorschau erscheint.</div>'});
+
+  // New features row
+  const bAuswahl=nd('Auswahlmodus',498,50,'#c084fc','pill',{tags:['ansicht'],
+    notesHtml:'<div><b>Auswahlmodus</b><br/>☑ Button oben rechts → aktivieren.<br/><br/><b>PC:</b> Einzelklick auf Knoten → zur Auswahl hinzufügen/entfernen. Kein Panel öffnet sich.<br/><b>Handy:</b> Tippen auf Knoten → kumulativ auswählen.<br/><br/>Aktionsleiste unten:<br/>• Farbe für alle ändern<br/>• ⬚ Gruppieren → erstellt Gruppen-Rahmen (direkt benennbar!)<br/>• 🗑️ alle löschen</div>'});
+
+  const bLayouts=nd('5 Layouts',515,368,'#e879f9','pill',{status:'idea',tags:['ansicht'],
+    notesHtml:'<div><b>Auto-Layouts (Sidebar)</b><br/><br/>⊙ <b>Radial</b> – erster Knoten im Zentrum, Rest auf Kreisen<br/>⊤ <b>Hierarchie</b> – BFS von oben nach unten<br/>⬚ <b>Gruppen-Cluster</b> – gruppierte Knoten werden zusammengezogen, jede Gruppe in eigenem Block<br/>⟳ <b>Kräfte-Layout</b> – Feder-Simulation: vernetzte Knoten nähern sich an<br/>▶ <b>Timeline (Status)</b> – horizontale Schwimmbahnen nach Status-Icon</div>'});
+
+  const cGruppe=nd('Gruppenbox',78,440,'#94a3b8','pill',{
+    notesHtml:'<div><b>Gruppen</b><br/>Shift+Drag (PC) oder Auswahlmodus → mehrere Knoten wählen → ⬚ Gruppieren.<br/><br/>Nach dem Erstellen: Gruppe sofort benennen (Inline-Textfeld öffnet sich automatisch).<br/>Doppelklick auf Gruppen-Label → umbenennen.<br/>Klick auf Gruppe oder Label → filtert Knoten dieser Gruppe.<br/><br/>Gruppen erscheinen in Suche und Gruppen-Filter.</div>'});
+
+  const allNodes=[center,bKnoten,bVerbindung,bFokus,bFilter,bSubmap,bLink,bKollaps,bExport,cStatus,cTags,cGruppe,bAuswahl,bLayouts];
+  const allEdges=[
+    ed(center.id,bKnoten.id,   {color:'#60a5fa',style:'curved',arrow:'forward'}),
+    ed(center.id,bVerbindung.id,{color:'#34d399',style:'curved',arrow:'forward'}),
+    ed(center.id,bFokus.id,    {color:'#fbbf24',style:'curved',arrow:'forward'}),
+    ed(center.id,bFilter.id,   {color:'#f472b6',style:'curved',arrow:'forward'}),
+    ed(center.id,bSubmap.id,   {color:'#a78bfa',style:'curved',arrow:'forward'}),
+    ed(center.id,bLink.id,     {color:'#2dd4bf',style:'curved',arrow:'forward'}),
+    ed(center.id,bKollaps.id,  {color:'#fb923c',style:'curved',arrow:'forward'}),
+    ed(center.id,bExport.id,   {color:'#a3e635',style:'curved',arrow:'forward'}),
+    ed(center.id,bAuswahl.id,  {color:'#c084fc',style:'curved',arrow:'forward'}),
+    ed(center.id,bLayouts.id,  {color:'#e879f9',style:'curved',arrow:'forward'}),
+    ed(bKnoten.id,cStatus.id,  {color:'#f87171',arrow:'forward'}),
+    ed(bKnoten.id,cTags.id,    {color:'#fb923c',arrow:'forward'}),
+    ed(bKollaps.id,cGruppe.id, {color:'#94a3b8',arrow:'forward',label:'Gruppen-Tool'}),
+    ed(bAuswahl.id,cGruppe.id, {color:'#c084fc',style:'straight',arrow:'forward',label:'erstellt'}),
+    ed(bFilter.id,bFokus.id,   {color:'#818cf840',style:'straight',arrow:'none',label:'Ansichts-Tools'}),
+    ed(bVerbindung.id,bLayouts.id,{color:'#34d39940',style:'straight',arrow:'none',label:'Canvas-Features'}),
+  ];
+
+  const m1=mkMap('◈ MindSpace – Features');
+  m1.nodes=allNodes;m1.edges=allEdges;
+  m1.groups=[
+    mkGroup([bFokus.id,bFilter.id,bAuswahl.id],'#818cf8','Ansicht'),
+    mkGroup([bKollaps.id,bExport.id,bLayouts.id],'#34d399','Werkzeuge'),
+    mkGroup([bSubmap.id,bLink.id],'#a78bfa','Maps & Navigation'),
+  ];
+
+  return {screen:'home',maps:{[m1.id]:m1,[m2.id]:m2,[sm.id]:sm},mapOrder:[m1.id,m2.id],currentMapId:null,navStack:[]};
 }
 function loadSaved(){
   try{const raw=localStorage.getItem(STORAGE_KEY);if(raw){const d=JSON.parse(raw);if(d?.maps&&d?.mapOrder)return{...createInitial(),...d,screen:'home'};}}catch(e){}
@@ -655,12 +942,17 @@ export default function MindSpaceApp(){
   const [svgSize,setSvgSize]       = useState({w:800,h:600});
   const [sidebarOpen,setSidebarOpen]=useState(false);
   const [focusMode,setFocusMode]   = useState(false);
+  const [focusNodeId,setFocusNodeId]=useState(null); // mobile: focus target without opening panel
   const [globalSearchOpen,setGlobalSearchOpen]=useState(false);
   const [inlineEdit,setInlineEdit] = useState(null); // {id,val}
   const [selBox,setSelBox]         = useState(null);  // {x0,y0,x1,y1} rubber band
   const [mapNameEdit,setMapNameEdit]= useState(null); // inline rename of current map
   const [collapsedNodes,setCollapsed]=useState(new Set()); // nodeIds whose children are hidden
   const [inlineEdgeLbl,setInlineEdgeLbl]=useState(null); // {id,val,x,y} inline edge label edit
+  const [highlightNode,setHighlightNode]=useState(null); // id of node to flash-highlight after search
+  const [selMode,setSelMode]=useState(false); // tap-to-multiselect mode (mobile + PC)
+  const [filterGroups,setFilterGroups]=useState(new Set()); // whitelist of group IDs
+  const [inlineGroupEdit,setInlineGroupEdit]=useState(null); // {id,val} group label inline edit
   const isMobile                   = typeof window!=='undefined'&&window.innerWidth<768;
   const pinchRef                   = useRef(null);
 
@@ -704,7 +996,13 @@ export default function MindSpaceApp(){
   const doDeleteMultiple=(ids)=>{pushHistory();setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],nodes:s.maps[mid].nodes.filter(n=>!ids.has(n.id)),edges:s.maps[mid].edges.filter(e=>!ids.has(e.from)&&!ids.has(e.to))}}};});setSelNodes(new Set());setSelNode(null);};
   const patchMultiple=(ids,patch)=>{pushHistory();setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],nodes:s.maps[mid].nodes.map(n=>ids.has(n.id)?{...n,...patch}:n)}}};});};
   const addEdgeBetween=(fromId,toId)=>{pushHistory();setApp(s=>{const mid=s.currentMapId;if(s.maps[mid].edges.some(e=>(e.from===fromId&&e.to===toId)||(e.from===toId&&e.to===fromId)))return s;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],edges:[...s.maps[mid].edges,mkEdge(fromId,toId)]}}};});};
-  const addGroup=(nodeIds,color)=>{pushHistory();setApp(s=>{const mid=s.currentMapId;const g=mkGroup(nodeIds,color);const groups=(s.maps[mid].groups||[]);return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],groups:[...groups,g]}}};});setSelNodes(new Set());};
+  const addGroup=(nodeIds,color)=>{
+    pushHistory();
+    const g=mkGroup(nodeIds,color,'');
+    setApp(s=>{const mid=s.currentMapId;const groups=(s.maps[mid].groups||[]);return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],groups:[...groups,g]}}};});
+    setSelNodes(new Set());
+    setTimeout(()=>setInlineGroupEdit({id:g.id,val:''}),40);
+  };
   const deleteGroup=(gid)=>setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],groups:(s.maps[mid].groups||[]).filter(g=>g.id!==gid)}}};});
   const patchGroup=(gid,patch)=>setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],groups:(s.maps[mid].groups||[]).map(g=>g.id===gid?{...g,...patch}:g)}}};});
   const addNode=()=>{pushHistory();const n=mkNode('Neu',160+rnd(300),120+rnd(230),COLORS[rnd(COLORS.length)]);setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],nodes:[...s.maps[mid].nodes,n]}}};});setSelNode(null);setSelEdge(null);setSidebarOpen(false);};
@@ -750,6 +1048,17 @@ export default function MindSpaceApp(){
     return {stack, pathStr, mapId:targetMapId};
   };
 
+  // Pan+zoom so a node is centred, then flash-highlight it
+  const zoomToNode=(nd,targetZoom=1.2)=>{
+    if(!nd||!svgRef.current) return;
+    const svgW=svgRef.current.clientWidth||800,svgH=svgRef.current.clientHeight||600;
+    const cx=nd.x+nd.w/2, cy=nd.y+nd.h/2;
+    setPan({x:svgW/2-cx*targetZoom, y:svgH/2-cy*targetZoom});
+    setZoom(targetZoom);
+    setHighlightNode(nd.id);
+    setTimeout(()=>setHighlightNode(null),1400);
+  };
+
   const jumpToNode=(mapId,nodeId)=>{
     setGlobalSearchOpen(false);
     const {stack}=buildNavPath(mapId);
@@ -758,11 +1067,22 @@ export default function MindSpaceApp(){
     setTimeout(()=>{
       setSelNode(nodeId);
       const nd=maps[mapId]?.nodes.find(n=>n.id===nodeId);
-      if(nd){const svgW=svgRef.current?.clientWidth||800,svgH=svgRef.current?.clientHeight||600;setPan({x:svgW/2-(nd.x+nd.w/2),y:svgH/2-(nd.y+nd.h/2)});}
+      if(nd) zoomToNode(nd,1.2);
     },80);
   };
 
-  // ── Export / Import ───────────────────────────────────────────────────────
+  // Local search: when there's exactly one match, zoom to it and flash
+  useEffect(()=>{
+    if(!searchTerm||!curMap) return;
+    const matches=curMap.nodes.filter(n=>
+      n.label.toLowerCase().includes(searchTerm.toLowerCase())||
+      (n.tags||[]).some(t=>t.toLowerCase().includes(searchTerm.toLowerCase()))
+    );
+    if(matches.length===1){
+      const nd=matches[0];
+      zoomToNode(nd,1.3);
+    }
+  },[searchTerm]);// eslint-disable-line
   const exportJSON=()=>{const json=JSON.stringify(app,null,2);try{const a=document.createElement('a');a.href='data:application/json;charset=utf-8,'+encodeURIComponent(json);a.download='mindspace-export.json';document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(ex){}setExportModal({type:'json',content:json});};
   const exportMarkdown=()=>{
     if(!curMap)return;
@@ -773,7 +1093,18 @@ export default function MindSpaceApp(){
   const exportPNG=()=>{const svg=svgRef.current;if(!svg)return;const s=new XMLSerializer().serializeToString(svg);const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=svg.clientWidth*2;c.height=svg.clientHeight*2;const ctx=c.getContext('2d');ctx.scale(2,2);ctx.fillStyle='#0b0b14';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(img,0,0);const dataUrl=c.toDataURL('image/png');try{const a=document.createElement('a');a.href=dataUrl;a.download=`${curMap?.name||'map'}.png`;document.body.appendChild(a);a.click();document.body.removeChild(a);}catch(ex){}setExportModal({type:'png',content:dataUrl});};img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(s);};
   const resetAll=()=>{setConfirm({msg:'Alle Daten auf diesem Gerät löschen?',onOk:()=>{try{localStorage.removeItem(STORAGE_KEY);}catch(e){}setApp(createInitial());setConfirm(null);}});};
   const importData=(data)=>{if(data?.maps&&data?.mapOrder)setApp(s=>({...s,...data,screen:'home'}));};
-  const autoLayout=(type)=>{if(!curMap)return;pushHistory();const newNodes=type==='radial'?layoutRadial(curMap.nodes):layoutHierarchical(curMap.nodes,curMap.edges);setApp(s=>({...s,maps:{...s.maps,[s.currentMapId]:{...s.maps[s.currentMapId],nodes:newNodes}}}));};
+  const autoLayout=(type)=>{
+    if(!curMap)return;
+    pushHistory();
+    let newNodes;
+    if(type==='radial')       newNodes=layoutRadial(curMap.nodes);
+    else if(type==='hierarchical') newNodes=layoutHierarchical(curMap.nodes,curMap.edges);
+    else if(type==='groups')  newNodes=layoutGroups(curMap.nodes,curMap.groups);
+    else if(type==='force')   newNodes=layoutForce(curMap.nodes,curMap.edges);
+    else if(type==='timeline')newNodes=layoutTimeline(curMap.nodes);
+    else newNodes=curMap.nodes;
+    setApp(s=>({...s,maps:{...s.maps,[s.currentMapId]:{...s.maps[s.currentMapId],nodes:newNodes}}}));
+  };
 
   // ── Pointer helpers ───────────────────────────────────────────────────────
   const evPos=(e)=>e.touches?{clientX:e.touches[0].clientX,clientY:e.touches[0].clientY}:{clientX:e.clientX,clientY:e.clientY};
@@ -865,13 +1196,16 @@ export default function MindSpaceApp(){
     // Use pan as fallback if no selection box grew
     dragRef.current._panFallback={sx:clientX,sy:clientY,ox:panR.current.x,oy:panR.current.y};
   };
-  const handleBgClick=()=>{if(!didMove.current){setSelNode(null);setSelEdge(null);setSelNodes(new Set());setConnMode(false);setInlineEdit(null);}};
+  const handleBgClick=()=>{if(!didMove.current){setSelNode(null);setSelEdge(null);setSelNodes(new Set());setConnMode(false);setInlineEdit(null);if(!focusMode)setFocusNodeId(null);setFilterGroups(new Set());}};
   const handleBgDbl=(e)=>{
+    if(e.target.tagName==='foreignObject'||e.target.tagName==='INPUT') return;
     const r=svgRef.current.getBoundingClientRect();const {clientX,clientY}=evPos(e);
     const x=(clientX-r.left-panR.current.x)/zoomR.current,y=(clientY-r.top-panR.current.y)/zoomR.current;
-    const n=mkNode('Neu',x-79,y-24,COLORS[rnd(COLORS.length)]);
+    const n=mkNode('',x-79,y-24,COLORS[rnd(COLORS.length)]);
     setApp(s=>{const mid=s.currentMapId;return {...s,maps:{...s.maps,[mid]:{...s.maps[mid],nodes:[...s.maps[mid].nodes,n]}}};});
     setSelNode(n.id);setSelEdge(null);
+    // Immediately open inline rename
+    setTimeout(()=>setInlineEdit({id:n.id,val:''}),30);
   };
   const handleNodeDown=(e,nodeId)=>{
     e.stopPropagation();didMove.current=false;
@@ -879,6 +1213,7 @@ export default function MindSpaceApp(){
     const {clientX,clientY}=evPos(e);const isTouch=!!e.touches;
     if(connectMode&&selNodeR.current&&nodeId!==selNodeR.current){addEdgeBetween(selNodeR.current,nodeId);setConnMode(false);return;}
     if(!isTouch){
+      if(selMode||focusMode) return; // handled by onClick
       if(selNodes.size>0&&selNodes.has(nodeId)){
         const cur=appR.current.maps[appR.current.currentMapId];
         const origins={};cur.nodes.filter(n=>selNodes.has(n.id)).forEach(n=>{origins[n.id]={x:n.x,y:n.y};});
@@ -890,19 +1225,36 @@ export default function MindSpaceApp(){
     const nd=curMap.nodes.find(n=>n.id===nodeId);
     if(nd) dragRef.current={type:'node',nodeId,sx:clientX,sy:clientY,ox:nd.x,oy:nd.y};
   };
-  // Separate click handler for link-node navigation (fires after mouseup, only if no drag)
-  const handleNodeClick=(e,nodeId)=>{e.stopPropagation();};
+  // Separate click handler: selMode toggle, focusMode target, or no-op
+  const handleNodeClick=(e,nodeId)=>{
+    e.stopPropagation();
+    if(selMode){
+      setSelNodes(prev=>{const n=new Set(prev);n.has(nodeId)?n.delete(nodeId):n.add(nodeId);return n;});
+      setSelNode(null);setSelEdge(null);
+    } else if(focusMode){
+      setFocusNodeId(prev=>prev===nodeId?null:nodeId);
+      setSelNode(null);setSelEdge(null);
+    }
+  };
   const handleNodeDbl=(e,nodeId)=>{
     e.stopPropagation();
+    if(selMode) return; // no dbl-click actions in selMode
     const nd=curMap?.nodes.find(n=>n.id===nodeId);
-    // Link-nodes: double-click navigates immediately
     if(nd?.linkMapId&&maps[nd.linkMapId]){openLinkMap(nd.linkMapId);return;}
     if(nd) setInlineEdit({id:nodeId,val:nd.label});
   };
   const handleNodeTouchEnd=(e,nodeId)=>{
     e.stopPropagation();
     if(connectMode&&selNodeR.current&&nodeId!==selNodeR.current){addEdgeBetween(selNodeR.current,nodeId);setConnMode(false);return;}
-    if(!didMove.current){setSelNode(nodeId);setSelEdge(null);setSelNodes(new Set());}
+    if(!didMove.current){
+      if(selMode){
+        setSelNodes(prev=>{const n=new Set(prev);n.has(nodeId)?n.delete(nodeId):n.add(nodeId);return n;});
+        setSelNode(null);setSelEdge(null);
+        return;
+      }
+      if(focusMode){setFocusNodeId(nodeId);return;}
+      setSelNode(nodeId);setSelEdge(null);setSelNodes(new Set());
+    }
   };
   const handleEdgeClick=(e,edgeId)=>{e.stopPropagation();setSelEdge(edgeId);setSelNode(null);setSelNodes(new Set());};
   const handleCpDown=(e,edgeId,cpx,cpy)=>{e.stopPropagation();didMove.current=false;const {clientX,clientY}=evPos(e);dragRef.current={type:'cp',edgeId,sx:clientX,sy:clientY,ox:cpx,oy:cpy};};
@@ -954,10 +1306,18 @@ export default function MindSpaceApp(){
   // ── Derived ───────────────────────────────────────────────────────────────
   const searchLow=searchTerm.toLowerCase();
   const allTags=curMap?[...new Set(curMap.nodes.flatMap(n=>n.tags||[]))]:[];
-  const matchingIds=searchTerm?new Set(curMap?.nodes.filter(n=>n.label.toLowerCase().includes(searchLow)||(n.tags||[]).some(t=>t.toLowerCase().includes(searchLow))).map(n=>n.id)):null;
+  const allGroups=curMap?.groups||[];
+  const matchingIds=searchTerm?new Set(curMap?.nodes.filter(n=>
+    n.label.toLowerCase().includes(searchLow)||(n.tags||[]).some(t=>t.toLowerCase().includes(searchLow))
+  ).map(n=>n.id)):null;
+  // Groups matching search
+  const matchingGroupIds=searchTerm?new Set(allGroups.filter(g=>(g.label||'').toLowerCase().includes(searchLow)).map(g=>g.id)):null;
 
-  // Focus mode: which nodes are "visible"
-  const focusVisibleIds=focusMode&&selNode&&curMap?new Set([selNode,...curMap.edges.filter(e=>e.from===selNode||e.to===selNode).flatMap(e=>[e.from,e.to])]):null;
+  // Focus mode: dim all nodes NOT reachable from focusSrc via directed edges
+  // focusSrc is set by clicking a node while focusMode is ON
+  // If no source selected yet, show all nodes (focusVisibleIds = null)
+  const focusSrc=focusMode?(focusNodeId||null):null;
+  const focusVisibleIds=focusSrc&&curMap?getFocusStrand(focusSrc,curMap.edges):null;
 
   // Collapse: compute all descendants of collapsed nodes
   const collapsedHidden=curMap?(() => {
@@ -974,6 +1334,11 @@ export default function MindSpaceApp(){
     const n=new Set(s);n.has(nodeId)?n.delete(nodeId):n.add(nodeId);return n;
   });
 
+  // Nodes in active group filter
+  const groupFilteredNodeIds=filterGroups.size>0
+    ?new Set(allGroups.filter(g=>filterGroups.has(g.id)).flatMap(g=>g.nodeIds))
+    :null;
+
   const visibleNodes=curMap?.nodes.filter(n=>{
     if(collapsedHidden.has(n.id)) return false;
     if(filterColors.size>0 && !filterColors.has(n.color)) return false;
@@ -985,6 +1350,7 @@ export default function MindSpaceApp(){
     if(filterStatus.size>0){
       if(!filterStatus.has(n.status||'none')) return false;
     }
+    if(groupFilteredNodeIds&&!groupFilteredNodeIds.has(n.id)) return false;
     return true;
   })||[];
 
@@ -1024,7 +1390,7 @@ export default function MindSpaceApp(){
   // ── Editor ────────────────────────────────────────────────────────────────
   return (
     <div style={{display:'flex',height:'100vh',background:'#0b0b14',color:'#c9d1d9',fontFamily:'"IBM Plex Sans",sans-serif',overflow:'hidden',userSelect:'none',touchAction:'none'}}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=Unbounded:wght@600&display=swap');*{box-sizing:border-box;margin:0;padding:0;}::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#0b0b14}::-webkit-scrollbar-thumb{background:#252540;border-radius:2px}input:focus,textarea:focus{border-color:#818cf8!important}button:hover{opacity:.78;}`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=Unbounded:wght@600&display=swap');*{box-sizing:border-box;margin:0;padding:0;}::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#0b0b14}::-webkit-scrollbar-thumb{background:#252540;border-radius:2px}input:focus,textarea:focus{border-color:#818cf8!important}button:hover{opacity:.78;}@keyframes hlPulse{0%{opacity:1;stroke-width:4}60%{opacity:.6;stroke-width:2}100%{opacity:0;stroke-width:1}}@keyframes flowFwd{to{stroke-dashoffset:-24}}@keyframes flowBwd{to{stroke-dashoffset:24}}`}</style>
 
       {sidebarOpen&&isMobile&&<div onClick={()=>setSidebarOpen(false)} style={{position:'fixed',inset:0,background:'#00000060',zIndex:99}}/>}
       {isMobile&&<button onClick={()=>setSidebarOpen(v=>!v)} style={{position:'fixed',top:12,left:12,zIndex:200,background:'#818cf8',border:'none',color:'#fff',borderRadius:10,width:42,height:42,fontSize:18,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 4px 16px #00000066',cursor:'pointer'}}>{sidebarOpen?'×':'☰'}</button>}
@@ -1063,14 +1429,19 @@ export default function MindSpaceApp(){
         <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'.1em',marginBottom:7}}>WERKZEUGE</div>
         <button onClick={addNode} style={{...btn('#818cf8','#818cf812'),justifyContent:'center',fontWeight:500,marginBottom:5}}>+ Knoten</button>
         <button onClick={()=>setConnMode(v=>!v)} style={{...btn(connectMode?'#f472b6':'#a5b4fc',connectMode?'#f472b615':'transparent'),justifyContent:'center',marginBottom:5}}>🔗 {connectMode?'Verbinden aktiv':'Verbinden'}</button>
-        <button onClick={()=>setShowTpl(true)} style={{...btn('#7dd3fc'),justifyContent:'center',marginBottom:5}}>📐 Vorlage</button>
-        <button onClick={()=>autoLayout('radial')} style={{...btn('#a78bfa'),justifyContent:'center',marginBottom:5}}>⊙ Radial-Layout</button>
-        <button onClick={()=>autoLayout('hierarchical')} style={{...btn('#a78bfa'),justifyContent:'center',marginBottom:5}}>⊤ Hierarchie-Layout</button>
-        <button onClick={()=>setFocusMode(v=>!v)} style={{...btn(focusMode?'#fbbf24':'#4a4a6a',focusMode?'#fbbf2415':'transparent'),justifyContent:'center',marginBottom:14,border:`1px solid ${focusMode?'#fbbf2460':'#1e1e30'}`}}>👁 Fokus-Modus {focusMode?'AN':'AUS'}</button>
+        <button onClick={()=>setShowTpl(true)} style={{...btn('#7dd3fc'),justifyContent:'center',marginBottom:14}}>📐 Vorlage</button>
+
+        <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'.1em',marginBottom:7}}>LAYOUT</div>
+        <button onClick={()=>autoLayout('radial')}       style={{...btn('#a78bfa'),justifyContent:'center',marginBottom:4,fontSize:11}}>⊙ Radial</button>
+        <button onClick={()=>autoLayout('hierarchical')} style={{...btn('#a78bfa'),justifyContent:'center',marginBottom:4,fontSize:11}}>⊤ Hierarchie</button>
+        <button onClick={()=>autoLayout('groups')}       style={{...btn('#818cf8'),justifyContent:'center',marginBottom:4,fontSize:11}}>⬚ Gruppen-Cluster</button>
+        <button onClick={()=>autoLayout('force')}        style={{...btn('#34d399'),justifyContent:'center',marginBottom:4,fontSize:11}}>⟳ Kräfte-Layout</button>
+        <button onClick={()=>autoLayout('timeline')}     style={{...btn('#fbbf24'),justifyContent:'center',marginBottom:14,fontSize:11}}>▶ Timeline (Status)</button>
+        <button onClick={()=>{setFocusMode(v=>{if(v)setFocusNodeId(null);return !v;});}} style={{...btn(focusMode?'#fbbf24':'#4a4a6a',focusMode?'#fbbf2415':'transparent'),justifyContent:'center',marginBottom:14,border:`1px solid ${focusMode?'#fbbf2460':'#1e1e30'}`}}>👁 Fokus-Modus {focusMode?'AN':'AUS'}</button>
 
         <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'.1em',marginBottom:8}}>FARB-FILTER</div>
         <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:4}}>
-          {COLORS.map(c=>{const active=filterColors.has(c);return <div key={c} onClick={()=>setFilterColors(s=>{const n=new Set(s);n.has(c)?n.delete(c):n.add(c);return n;})} style={{width:18,height:18,borderRadius:'50%',background:c,cursor:'pointer',border:active?'3px solid #fff':'2px solid transparent',opacity:active||filterColors.size===0?1:.3,transition:'all .15s'}}/>;})}</div>
+          {COLORS.map(c=>{const active=filterColors.has(c);return <div key={c} onClick={()=>setFilterColors(s=>{const n=new Set(s);n.has(c)?n.delete(c):n.add(c);return n;})} style={{width:22,height:22,borderRadius:'50%',background:c,cursor:'pointer',border:active?'3px solid #fff':'2px solid #1e1e30',boxShadow:active?`0 0 8px ${c}aa`:'none',opacity:active||filterColors.size===0?1:.3,transition:'all .15s'}}/>;})}</div>
         {filterColors.size>0&&<button onClick={()=>setFilterColors(new Set())} style={{fontSize:9,color:'#f472b6',background:'none',border:'none',cursor:'pointer',fontFamily:'inherit',marginBottom:6,padding:0}}>× Filter zurücksetzen</button>}
         {filterColors.size===0&&<div style={{height:6}}/>}
 
@@ -1087,6 +1458,14 @@ export default function MindSpaceApp(){
           {[{id:'none',icon:'–',label:'Kein Status'},...STATUS_LIST].map(s=>{const active=filterStatus.has(s.id);return <div key={s.id} title={s.label} onClick={()=>setFilterStatus(prev=>{const n=new Set(prev);n.has(s.id)?n.delete(s.id):n.add(s.id);return n;})} style={{fontSize:14,padding:'3px 6px',borderRadius:7,background:active?'#252540':'transparent',border:`1px solid ${active?'#818cf8':'#252540'}`,cursor:'pointer',opacity:active||filterStatus.size===0?1:.4,transition:'all .15s'}}>{s.icon}</div>;})}</div>
         {filterStatus.size>0&&<button onClick={()=>setFilterStatus(new Set())} style={{fontSize:9,color:'#f472b6',background:'none',border:'none',cursor:'pointer',fontFamily:'inherit',marginBottom:4,padding:0}}>× Filter zurücksetzen</button>}
         <div style={{height:10}}/>
+
+        {allGroups.length>0&&<>
+          <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'.1em',marginBottom:6}}>GRUPPEN-FILTER</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:4}}>
+            {allGroups.map(g=>{const active=filterGroups.has(g.id);return <div key={g.id} onClick={()=>setFilterGroups(s=>{const n=new Set(s);n.has(g.id)?n.delete(g.id):n.add(g.id);return n;})} style={{fontSize:9,padding:'2px 7px',borderRadius:10,background:active?g.color:'#1e1e30',color:active?'#0b0b14':g.color,cursor:'pointer',border:`1px solid ${active?g.color:g.color+'40'}`,transition:'all .15s',opacity:active||filterGroups.size===0?1:.4,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>⬚ {g.label||'Gruppe'}</div>;})}</div>
+          {filterGroups.size>0&&<button onClick={()=>setFilterGroups(new Set())} style={{fontSize:9,color:'#f472b6',background:'none',border:'none',cursor:'pointer',fontFamily:'inherit',marginBottom:4,padding:0}}>× Filter zurücksetzen</button>}
+          <div style={{height:10}}/>
+        </>}
 
         <div style={{fontSize:10,color:'#3a3a55',letterSpacing:'.1em',marginBottom:8}}>EXPORT</div>
         <button onClick={exportJSON}     style={{...btn('#34d399'),marginBottom:5,fontSize:11}}>💾 Als JSON speichern</button>
@@ -1150,13 +1529,36 @@ export default function MindSpaceApp(){
             {(curMap.groups||[]).map(g=>{
               const gnodes=curMap.nodes.filter(n=>g.nodeIds.includes(n.id));
               if(!gnodes.length)return null;
-              const gx0=Math.min(...gnodes.map(n=>n.x))-16,gy0=Math.min(...gnodes.map(n=>n.y))-28;
+              const gx0=Math.min(...gnodes.map(n=>n.x))-16,gy0=Math.min(...gnodes.map(n=>n.y))-30;
               const gx1=Math.max(...gnodes.map(n=>n.x+n.w))+16,gy1=Math.max(...gnodes.map(n=>n.y+n.h))+16;
+              const isGroupMatch=matchingGroupIds&&matchingGroupIds.has(g.id);
+              const isGroupFiltered=filterGroups.has(g.id);
+              const gStroke=isGroupMatch?'#fbbf24':g.color;
+              const gSW=isGroupMatch?2.5:1.5;
               return (
                 <g key={g.id}>
-                  <rect x={gx0} y={gy0} width={gx1-gx0} height={gy1-gy0} rx={14} fill={`${g.color}0d`} stroke={g.color} strokeWidth={1.5} strokeDasharray="6,4" opacity={.9}/>
-                  {g.label&&<text x={gx0+10} y={gy0+18} fill={g.color} fontSize={11} fontFamily="IBM Plex Sans" fontWeight={600} opacity={.85}>{g.label}</text>}
-                  <text x={gx1-14} y={gy0+16} fill={g.color} fontSize={13} opacity={.6} style={{cursor:'pointer'}} onClick={()=>deleteGroup(g.id)}>×</text>
+                  <rect x={gx0} y={gy0} width={gx1-gx0} height={gy1-gy0} rx={14}
+                    fill={isGroupFiltered?`${g.color}18`:`${g.color}0a`}
+                    stroke={gStroke} strokeWidth={gSW} strokeDasharray="6,4" opacity={.92}
+                    style={{cursor:'pointer'}} onClick={()=>{setFilterGroups(s=>{const n=new Set(s);n.has(g.id)?n.delete(g.id):n.add(g.id);return n;});}}/>
+                  {/* Group label — click to filter, double-click to rename */}
+                  {inlineGroupEdit?.id===g.id
+                    ?<foreignObject x={gx0+8} y={gy0+6} width={gx1-gx0-40} height={22} onClick={e=>e.stopPropagation()}>
+                        <input autoFocus value={inlineGroupEdit.val}
+                          onChange={e=>setInlineGroupEdit(v=>({...v,val:e.target.value}))}
+                          onBlur={()=>{patchGroup(g.id,{label:inlineGroupEdit.val});setInlineGroupEdit(null);}}
+                          onKeyDown={e=>{if(e.key==='Enter'||e.key==='Escape'){patchGroup(g.id,{label:inlineGroupEdit.val});setInlineGroupEdit(null);}e.stopPropagation();}}
+                          style={{width:'100%',background:'#0d0d18',border:`1px solid ${g.color}`,color:'#e2e8f0',borderRadius:4,padding:'2px 6px',fontSize:10,outline:'none',fontFamily:'IBM Plex Sans',boxSizing:'border-box'}}/>
+                      </foreignObject>
+                    :<text x={gx0+10} y={gy0+20} fill={gStroke} fontSize={11} fontFamily="IBM Plex Sans" fontWeight={600} opacity={.9}
+                        style={{cursor:'pointer'}}
+                        onClick={e=>{e.stopPropagation();setFilterGroups(s=>{const n=new Set(s);n.has(g.id)?n.delete(g.id):n.add(g.id);return n;});}}
+                        onDoubleClick={e=>{e.stopPropagation();setInlineGroupEdit({id:g.id,val:g.label||''});}}>
+                      {g.label||'Gruppe'} {isGroupFiltered?'●':''}
+                    </text>
+                  }
+                  <text x={gx1-14} y={gy0+18} fill={g.color} fontSize={13} opacity={.6} style={{cursor:'pointer'}}
+                    onClick={e=>{e.stopPropagation();deleteGroup(g.id);}}>×</text>
                 </g>
               );
             })}
@@ -1177,6 +1579,21 @@ export default function MindSpaceApp(){
                   style={{opacity:focusDim?.15:1,transition:'opacity .3s'}}>
                   <path d={geo.d} fill="none" stroke="transparent" strokeWidth={18}/>
                   <path d={geo.d} fill="none" stroke={col} strokeWidth={isSel?2.5:1.5} strokeDasharray={isSel?'7,3':undefined}/>
+                  {edge.animated&&(()=>{
+                    const isBoth=edge.arrow==='both';
+                    const isBwd =edge.arrow==='backward';
+                    if(isBoth){
+                      // Two streams with wide gaps, phase-offset so they interleave cleanly
+                      return <>
+                        <path d={geo.d} fill="none" stroke={col} strokeWidth={2.5} strokeDasharray="6,18" strokeLinecap="round"
+                          style={{animation:'flowFwd 1.1s linear infinite',opacity:.8}}/>
+                        <path d={geo.d} fill="none" stroke={col} strokeWidth={2.5} strokeDasharray="6,18" strokeLinecap="round"
+                          style={{animation:'flowBwd 1.1s linear infinite',opacity:.8,strokeDashoffset:12}}/>
+                      </>;
+                    }
+                    return <path d={geo.d} fill="none" stroke={col} strokeWidth={2.5} strokeDasharray="7,9" strokeLinecap="round"
+                      style={{animation:`${isBwd?'flowBwd':'flowFwd'} .85s linear infinite`,opacity:.85}}/>;
+                  })()}
                   {(edge.arrow==='forward'||edge.arrow==='both')&&<polygon points={arrowPts(geo.x2,geo.y2,geo.endDir)} fill={col}/>}
                   {(edge.arrow==='backward'||edge.arrow==='both')&&<polygon points={arrowPts(geo.x1,geo.y1,geo.startDir)} fill={col}/>}
                   {isSel&&geo.handlePos&&<circle cx={geo.handlePos.x} cy={geo.handlePos.y} r={9} fill="#818cf8" stroke="#0b0b14" strokeWidth={2} style={{cursor:'grab'}} onMouseDown={ev=>{ev.stopPropagation();if(!edge.routing)patchEdge(edge.id,{routing:true});handleCpDown(ev,edge.id,geo.handlePos.x,geo.handlePos.y);}} onTouchStart={ev=>{ev.stopPropagation();if(!edge.routing)patchEdge(edge.id,{routing:true});handleCpDown(ev,edge.id,geo.handlePos.x,geo.handlePos.y);}} onClick={ev=>ev.stopPropagation()}/>}
@@ -1201,8 +1618,8 @@ export default function MindSpaceApp(){
               const isSel=selNode===node.id;
               const isMultiSel=selNodes.has(node.id);
               const isMatch=matchingIds&&matchingIds.has(node.id);
+              const isHighlight=highlightNode===node.id;
               const focusDim=focusVisibleIds&&!focusVisibleIds.has(node.id);
-              const statusItem=STATUS_LIST.find(s=>s.id===node.status);
               return (
                 <g key={node.id}
                   onMouseDown={e=>handleNodeDown(e,node.id)}
@@ -1216,6 +1633,7 @@ export default function MindSpaceApp(){
                   {isMultiSel&&<rect x={node.x-7} y={node.y-7} width={node.w+14} height={node.h+14} rx={14} fill="#818cf8" opacity={.12} style={{pointerEvents:'none'}}/>}
                   {isSel&&<rect x={node.x-9} y={node.y-9} width={node.w+18} height={node.h+18} rx={16} fill={node.color} opacity={.1} style={{pointerEvents:'none'}}/>}
                   {isMatch&&<rect x={node.x-5} y={node.y-5} width={node.w+10} height={node.h+10} rx={13} fill="none" stroke="#fbbf24" strokeWidth={2} opacity={.8} style={{pointerEvents:'none'}}/>}
+                  {isHighlight&&<rect x={node.x-12} y={node.y-12} width={node.w+24} height={node.h+24} rx={18} fill="none" stroke="#fbbf24" strokeWidth={3} style={{pointerEvents:'none',animation:'hlPulse 1.4s ease-out forwards'}}/>}
                   <NodeShape node={node} selected={isSel}/>
                   {(node.shape==='rounded'||node.shape==='rect')&&<rect x={node.x} y={node.y} width={5} height={node.h} rx={2} fill={node.color} style={{pointerEvents:'none'}}/>}
 
@@ -1225,8 +1643,8 @@ export default function MindSpaceApp(){
                       <input value={inlineEdit.val}
                         autoFocus
                         onChange={e=>setInlineEdit(v=>({...v,val:e.target.value}))}
-                        onBlur={()=>{if(inlineEdit)patchNode(inlineEdit.id,{label:inlineEdit.val||'Neu'});setInlineEdit(null);}}
-                        onKeyDown={e=>{if(e.key==='Enter'||e.key==='Escape'){patchNode(inlineEdit.id,{label:inlineEdit.val||'Neu'});setInlineEdit(null);}e.stopPropagation();}}
+                        onBlur={()=>{if(inlineEdit){const lbl=inlineEdit.val.trim()||'Neu';patchNode(inlineEdit.id,{label:lbl});}setInlineEdit(null);}}
+                        onKeyDown={e=>{if(e.key==='Enter'||e.key==='Escape'){const lbl=inlineEdit.val.trim()||'Neu';patchNode(inlineEdit.id,{label:lbl});setInlineEdit(null);}e.stopPropagation();}}
                         onClick={e=>e.stopPropagation()}
                         style={{width:'100%',background:'#0d0d18',border:'1px solid #818cf8',color:'#e2e8f0',borderRadius:4,padding:'2px 6px',fontSize:12,outline:'none',fontFamily:'IBM Plex Sans',boxSizing:'border-box'}}/>
                     </foreignObject>
@@ -1235,19 +1653,43 @@ export default function MindSpaceApp(){
                       clipPath={`inset(0 0 0 0)`}>{node.label}</text>
                   }
 
-                  {/* Status icon */}
-                  {statusItem&&<text x={node.x+node.w-4} y={node.y+4} fontSize={13} textAnchor="end" dominantBaseline="hanging" style={{pointerEvents:'none'}}>{statusItem.icon}</text>}
-                  {/* Tags indicator */}
-                  {(node.tags||[]).length>0&&<circle cx={node.x+8} cy={node.y+node.h-8} r={4} fill="#818cf8" opacity={.7} style={{pointerEvents:'none'}}/>}
-                  {/* Sub-map indicator */}
-                  {node.childMapId&&<circle cx={node.x+node.w-9} cy={node.y+9} r={5} fill={node.color} opacity={.9} style={{pointerEvents:'none'}}/>}
-                  {/* Link-map indicator: ⇒ arrow + dashed underline */}
-                  {node.linkMapId&&maps[node.linkMapId]&&<>
-                    <text x={node.x+node.w-5} y={node.y+node.h-5} fontSize={11} textAnchor="end" fill={node.color} opacity={.9} style={{pointerEvents:'none'}}>⇒</text>
-                    <line x1={node.x+8} y1={node.y+node.h-1} x2={node.x+node.w-8} y2={node.y+node.h-1} stroke={node.color} strokeWidth={1} strokeDasharray="3,2" opacity={.5} style={{pointerEvents:'none'}}/>
-                  </>}
-                  {/* Notes indicator */}
-                  {node.notesHtml&&<circle cx={node.x+node.w-22} cy={node.y+9} r={4} fill="#818cf860" style={{pointerEvents:'none'}}/>}
+                  {/* ClipPath for this node — all indicators are auto-clipped to shape */}
+                  <defs><clipPath id={`nc-${node.id}`}><NodeShapeClip node={node} pad={1}/></clipPath></defs>
+
+                  {/* All indicators inside clip group — never escape the node shape */}
+                  <g clipPath={`url(#nc-${node.id})`} style={{pointerEvents:'none'}}>
+                    {(()=>{
+                      const pos=getIndicatorPositions(node);
+                      const SLOT=13;
+                      // Top-right: submap / notes / link indicators (row left←right)
+                      const topItems=[];
+                      if(node.childMapId)                      topItems.push({type:'submap'});
+                      if(node.notesHtml)                       topItems.push({type:'notes'});
+                      if(node.linkMapId&&maps[node.linkMapId]) topItems.push({type:'link'});
+                      const topElems=topItems.map((item,i)=>{
+                        const cx=pos.tr.x-i*SLOT, cy=pos.tr.y, r=5;
+                        const bg=<circle key={`bg${i}`} cx={cx} cy={cy} r={r+1.5} fill="#0b0b14" opacity={.55}/>;
+                        if(item.type==='submap') return [bg,<circle key="sm" cx={cx} cy={cy} r={r} fill={node.color} opacity={.92}/>];
+                        if(item.type==='notes')  return [bg,<circle key="nt" cx={cx} cy={cy} r={r} fill="#818cf8" opacity={.8}/>];
+                        if(item.type==='link')   return [bg,<text   key="lk" x={cx} y={cy+3.5} fontSize={9} textAnchor="middle" fill={node.color} fontWeight={700}>⇒</text>];
+                        return null;
+                      }).flat().filter(Boolean);
+                      // Bottom-right: status icon with dark badge
+                      const statusItem2=STATUS_LIST.find(s=>s.id===node.status);
+                      const statusElem=statusItem2?[
+                        <rect key="sbg" x={pos.br.x-8} y={pos.br.y-8} width={17} height={16} rx={4} fill="#0b0b14" opacity={.55}/>,
+                        <text key="sic" x={pos.br.x} y={pos.br.y+4.5} fontSize={11} textAnchor="middle" dominantBaseline="middle">{statusItem2.icon}</text>
+                      ]:[];
+                      // Bottom-left: tags dot
+                      const tagsElem=(node.tags||[]).length>0?[
+                        <circle key="tg" cx={pos.bl.x} cy={pos.bl.y} r={4.5} fill="#818cf8" opacity={.8}/>,
+                        <text key="th" x={pos.bl.x} y={pos.bl.y+3.5} fontSize={7} textAnchor="middle" fill="#0b0b14" fontWeight={700}>#</text>
+                      ]:[];
+                      return [...topElems,...statusElem,...tagsElem];
+                    })()}
+                  </g>
+                  {/* Link underline always on bottom edge */}
+                  {node.linkMapId&&maps[node.linkMapId]&&<line x1={node.x+8} y1={node.y+node.h-1} x2={node.x+node.w-8} y2={node.y+node.h-1} stroke={node.color} strokeWidth={1} strokeDasharray="3,2" opacity={.35} style={{pointerEvents:'none'}}/>}
                   {/* Collapse badge */}
                   {collapsedNodes.has(node.id)&&(()=>{
                     const cnt=collapsedChildCount[node.id]||0;
@@ -1281,13 +1723,20 @@ export default function MindSpaceApp(){
 
         {showMinimap&&<Minimap nodes={visibleNodes} edges={curMap.edges} pan={pan} zoom={zoom} svgW={svgSize.w} svgH={svgSize.h} hiddenColors={filterColors}/>}
 
-        {/* Canvas overlay: Fokus-Modus toggle + active filter badges */}
+        {/* Canvas overlay: Fokus-Modus + Auswahlmodus + active filter badges */}
         <div style={{position:'absolute',top:12,right:12,display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6,zIndex:50,pointerEvents:'none'}}>
-          <button onClick={()=>setFocusMode(v=>!v)} style={{pointerEvents:'all',background:focusMode?'#fbbf24':'#0e0e19cc',border:`1px solid ${focusMode?'#fbbf24':'#252540'}`,color:focusMode?'#0b0b14':'#7a7a9a',borderRadius:9,padding:'6px 11px',fontSize:11,cursor:'pointer',fontFamily:'inherit',fontWeight:focusMode?600:400,boxShadow:'0 2px 12px #00000055',backdropFilter:'blur(4px)'}}>
-            👁 {focusMode?'Fokus AN':'Fokus'}
-          </button>
-          {(filterColors.size>0||filterTags.size>0||filterStatus.size>0)&&(
-            <div style={{pointerEvents:'all',background:'#0e0e19cc',border:'1px solid #fbbf2440',borderRadius:9,padding:'5px 10px',fontSize:10,color:'#fbbf24',display:'flex',gap:6,alignItems:'center',backdropFilter:'blur(4px)',cursor:'pointer'}} onClick={()=>{setFilterColors(new Set());setFilterTags(new Set());setFilterStatus(new Set());}}>
+          <div style={{display:'flex',gap:6,pointerEvents:'all'}}>
+            <button onClick={()=>{setSelMode(v=>{if(!v){setFocusMode(false);setFocusNodeId(null);}return !v;});}}
+              style={{background:selMode?'#818cf8':'#0e0e19cc',border:`1px solid ${selMode?'#818cf8':'#252540'}`,color:selMode?'#fff':'#7a7a9a',borderRadius:9,padding:'6px 11px',fontSize:11,cursor:'pointer',fontFamily:'inherit',fontWeight:selMode?600:400,boxShadow:'0 2px 12px #00000055',backdropFilter:'blur(4px)'}}>
+              ☑ {selMode?`Auswahl: ${selNodes.size}`:'Auswahl'}
+            </button>
+            <button onClick={()=>{setFocusMode(v=>{if(v)setFocusNodeId(null);return !v;});if(selMode)setSelMode(false);}}
+              style={{background:focusMode?'#fbbf24':'#0e0e19cc',border:`1px solid ${focusMode?'#fbbf24':'#252540'}`,color:focusMode?'#0b0b14':'#7a7a9a',borderRadius:9,padding:'6px 11px',fontSize:11,cursor:'pointer',fontFamily:'inherit',fontWeight:focusMode?600:400,boxShadow:'0 2px 12px #00000055',backdropFilter:'blur(4px)'}}>
+              👁 {focusMode?(focusNodeId?`Fokus: ${curMap?.nodes.find(n=>n.id===focusNodeId)?.label||'…'}`:'Knoten wählen'):'Fokus'}
+            </button>
+          </div>
+          {(filterColors.size>0||filterTags.size>0||filterStatus.size>0||filterGroups.size>0)&&(
+            <div style={{pointerEvents:'all',background:'#0e0e19cc',border:'1px solid #fbbf2440',borderRadius:9,padding:'5px 10px',fontSize:10,color:'#fbbf24',display:'flex',gap:6,alignItems:'center',backdropFilter:'blur(4px)',cursor:'pointer'}} onClick={()=>{setFilterColors(new Set());setFilterTags(new Set());setFilterStatus(new Set());setFilterGroups(new Set());}}>
               ⚠ Filter aktiv — × zurücksetzen
             </div>
           )}
@@ -1422,6 +1871,11 @@ export default function MindSpaceApp(){
               <>
                 <label style={lbl}>BESCHREIBUNG</label>
                 <input value={selEdgeObj.label||''} onChange={e=>patchEdge(selEdge,{label:e.target.value})} placeholder="z.B. besteht aus…" style={{...inp,marginBottom:14}}/>
+                <label style={lbl}>ANIMATION</label>
+                <button onClick={()=>patchEdge(selEdge,{animated:!selEdgeObj.animated})}
+                  style={{...btn(selEdgeObj.animated?'#34d399':'#3a3a55',selEdgeObj.animated?'#0d1f1560':'transparent'),justifyContent:'center',marginBottom:14,border:`1px solid ${selEdgeObj.animated?'#34d39960':'#1e1e30'}`}}>
+                  {selEdgeObj.animated?'▶▶ Fluss AN':'▶▶ Fluss AUS'}
+                </button>
                 <label style={lbl}>PFEILRICHTUNG</label>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:5,marginBottom:14}}>
                   {[['none','─ Keine'],['forward','→ Vorwärts'],['backward','← Rückwärts'],['both','↔ Beide']].map(([v,l])=><button key={v} onClick={()=>patchEdge(selEdge,{arrow:v})} style={{...btn(selEdgeObj.arrow===v?'#a5b4fc':'#3a3a55',selEdgeObj.arrow===v?'#818cf820':'transparent'),justifyContent:'center',fontSize:11,border:`1px solid ${selEdgeObj.arrow===v?'#818cf860':'#1e1e30'}`}}>{l}</button>)}
